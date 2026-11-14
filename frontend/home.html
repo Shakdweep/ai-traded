@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>AI Traded</title>
+  <meta name="description" content="A private learning project for exploring Indian stock-market data and practising with paper trading.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch { }</script>
+  <style>
+    :root {
+      --bg: #0b0f14; --bg2: #10161d; --panel: #131a22; --panel2: #18212b; --line: #223040; --line2: #2b3b4e;
+      --text: #e6edf3; --muted: #8b9bb0; --dim: #5d6d80;
+      --bull: #22c55e; --bear: #ef4444; --warn: #eab308; --info: #38bdf8; --accent: #7c9cff;
+      --grid: rgba(124,156,255,.05); --glow1: rgba(34,197,94,.16); --glow2: rgba(56,189,248,.14);
+      color-scheme: dark;
+    }
+    :root[data-theme="light"] {
+      --bg: #f4f6f9; --bg2: #eef1f5; --panel: #ffffff; --panel2: #f7f9fb; --line: #dfe5ec; --line2: #cfd8e3;
+      --text: #0f1720; --muted: #566578; --dim: #8796a8;
+      --bull: #15803d; --bear: #c62828; --warn: #a16207; --info: #0369a1; --accent: #3b5bdb;
+      --grid: rgba(59,91,219,.06); --glow1: rgba(21,128,61,.10); --glow2: rgba(3,105,161,.09);
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body { background: var(--bg); color: var(--text); font: 16px/1.6 "Inter", system-ui, sans-serif; overflow-x: hidden; }
+    a { color: inherit; text-decoration: none; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+    /* nav */
+    nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 82%, transparent);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+    nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 68px; gap: 12px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 19px; }
+    .logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, var(--bull), var(--info));
+      display: grid; place-items: center; flex: none; }
+    .logo svg { width: 18px; height: 18px; }
+    .nav-actions { display: flex; gap: 10px; align-items: center; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; padding: 11px 20px; border-radius: 10px;
+      font-weight: 600; font-size: 15px; border: 1px solid var(--line2); background: var(--panel); color: var(--text);
+      transition: border-color .15s, filter .15s, transform .08s; white-space: nowrap; }
+    .btn:hover { border-color: var(--accent); } .btn:active { transform: translateY(1px); }
+    .btn.primary { border: 0; color: #fff; background: linear-gradient(135deg, var(--accent), var(--info)); }
+    .btn.primary:hover { filter: brightness(1.08); }
+    .btn.lg { padding: 14px 26px; font-size: 16px; border-radius: 12px; }
+
+    /* hero */
+    .hero { position: relative; padding: 96px 0 80px; text-align: center; }
+    .hero::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+      background:
+        radial-gradient(600px 380px at 20% 10%, var(--glow1), transparent 70%),
+        radial-gradient(700px 420px at 80% 60%, var(--glow2), transparent 70%),
+        linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 44px 44px,
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 44px 44px; }
+    .badge { display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px; border-radius: 999px;
+      font-size: 13px; font-weight: 600; color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+      background: color-mix(in srgb, var(--warn) 9%, transparent); }
+    .badge i { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+    h1 { margin: 26px auto 20px; max-width: 760px; font-size: clamp(34px, 6vw, 56px); line-height: 1.1;
+      letter-spacing: -1px; font-weight: 800; }
+    h1 span { background: linear-gradient(135deg, var(--bull), var(--info)); -webkit-background-clip: text;
+      background-clip: text; color: transparent; }
+    .lead { margin: 0 auto; max-width: 600px; font-size: 18px; color: var(--muted); }
+    .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 36px; }
+    .small { margin-top: 18px; font-size: 13px; color: var(--dim); }
+
+    /* preview card (illustration only, no real data) */
+    .preview { margin: 64px auto 0; max-width: 860px; border-radius: 18px; border: 1px solid var(--line2);
+      background: var(--panel); box-shadow: 0 30px 80px -30px rgba(0,0,0,.5); overflow: hidden; text-align: left; }
+    .pv-top { display: flex; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--line); align-items: center; }
+    .pv-top i { width: 10px; height: 10px; border-radius: 50%; background: var(--line2); }
+    .pv-top span { margin-left: 10px; font-size: 13px; color: var(--dim); }
+    .pv-body { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; padding: 22px; }
+    .pv-tile { border: 1px solid var(--line); border-radius: 12px; padding: 16px; background: var(--panel2); }
+    .pv-tile b { display: block; font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 10px; }
+    .bar { height: 8px; border-radius: 99px; background: var(--line); margin: 8px 0; }
+    .bar.a { width: 70%; } .bar.b { width: 45%; } .bar.c { width: 85%; }
+    .pv-chart { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 12px; background: var(--panel2); padding: 12px; }
+    .pv-chart svg { display: block; width: 100%; height: 150px; }
+    .pv-cap { padding: 0 22px 18px; font-size: 12px; color: var(--dim); }
+
+    /* sections */
+    section { padding: 88px 0; }
+    section.alt { background: var(--bg2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent); }
+    h2 { margin: 10px 0 14px; font-size: clamp(26px, 4vw, 36px); letter-spacing: -.5px; line-height: 1.2; }
+    .sec-lead { margin: 0 0 48px; max-width: 620px; color: var(--muted); font-size: 17px; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 22px; }
+    .feature { padding: 28px; border-radius: 16px; border: 1px solid var(--line); background: var(--panel); }
+    .ico { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 18px;
+      background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
+    .ico svg { width: 22px; height: 22px; }
+    .feature h3 { margin: 0 0 8px; font-size: 18px; }
+    .feature p { margin: 0; color: var(--muted); font-size: 15px; }
+
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 22px; counter-reset: s; }
+    .step { padding: 28px; border-radius: 16px; border: 1px solid var(--line); background: var(--panel); }
+    .step::before { counter-increment: s; content: counter(s); display: grid; place-items: center; width: 36px; height: 36px;
+      border-radius: 50%; font-weight: 800; color: #fff; margin-bottom: 16px;
+      background: linear-gradient(135deg, var(--bull), var(--info)); }
+    .step h3 { margin: 0 0 8px; font-size: 18px; }
+    .step p { margin: 0; color: var(--muted); font-size: 15px; }
+
+    .notice { display: flex; gap: 18px; align-items: flex-start; padding: 28px; border-radius: 16px;
+      border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 7%, transparent); }
+    .notice svg { flex: none; width: 26px; height: 26px; color: var(--warn); margin-top: 2px; }
+    .notice h3 { margin: 0 0 8px; font-size: 18px; }
+    .notice ul { margin: 0; padding-left: 18px; color: var(--muted); }
+    .notice li { margin: 4px 0; }
+
+    .final { text-align: center; }
+    .final .cta { margin-top: 28px; }
+    footer { padding: 36px 0 48px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+    footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    #theme { cursor: pointer; background: none; border: 1px solid var(--line2); color: var(--muted); border-radius: 10px;
+      width: 42px; height: 42px; font-size: 16px; }
+
+    @media (max-width: 640px) {
+      .wrap { padding: 0 16px; }
+      nav .btn.ghost { display: none; }
+      .brand { white-space: nowrap; font-size: 17px; }
+      nav .btn.primary { padding: 10px 14px; font-size: 14px; }
+      .hero { padding: 64px 0 56px; }
+      .pv-body { grid-template-columns: 1fr; }
+      section { padding: 64px 0; }
+      .notice { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="wrap">
+      <a class="brand" href="/"><span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg></span>AI Traded</a>
+      <div class="nav-actions">
+        <button id="theme" title="Light / dark" aria-label="Toggle light or dark theme">◐</button>
+        <a class="btn ghost" href="/login">Sign in</a>
+        <a class="btn primary" href="/signup" data-signup>Create account</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="wrap">
+      <span class="badge"><i></i>Private beta · invite only</span>
+      <h1>Learn the Indian market <span>without risking a rupee</span></h1>
+      <p class="lead">Explore NSE and BSE data, build your own screeners, study charts, and practise with a paper-trading
+        account. Everything is simulated, so you can learn safely.</p>
+      <div class="cta">
+        <a class="btn primary lg" href="/signup" data-signup>Create account</a>
+        <a class="btn lg" href="/login">Sign in</a>
+      </div>
+      <p class="small">You need an invite code from the owner to create an account.</p>
+
+      <div class="preview" aria-hidden="true">
+        <div class="pv-top"><i></i><i></i><i></i><span>AI Traded · dashboard</span></div>
+        <div class="pv-body">
+          <div class="pv-tile"><b>Market overview</b><div class="bar a"></div><div class="bar b"></div></div>
+          <div class="pv-tile"><b>Your screener</b><div class="bar c"></div><div class="bar a"></div></div>
+          <div class="pv-tile"><b>Paper account</b><div class="bar b"></div><div class="bar c"></div></div>
+          <div class="pv-chart">
+            <svg viewBox="0 0 800 150" preserveAspectRatio="none">
+              <defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#22c55e" stop-opacity=".22"/><stop offset="1" stop-color="#22c55e" stop-opacity="0"/></linearGradient></defs>
+              <path d="M0 120 L50 112 L100 118 L150 96 L200 102 L250 84 L300 90 L350 66 L400 74 L450 58 L500 68 L550 46 L600 54 L650 36 L700 44 L750 24 L800 28 L800 150 L0 150 Z" fill="url(#g)"/>
+              <path d="M0 120 L50 112 L100 118 L150 96 L200 102 L250 84 L300 90 L350 66 L400 74 L450 58 L500 68 L550 46 L600 54 L650 36 L700 44 L750 24 L800 28" fill="none" stroke="#22c55e" stroke-width="2.5"/>
+            </svg>
+          </div>
+        </div>
+        <p class="pv-cap">Illustration only, not real market data.</p>
+      </div>
+    </div>
+  </header>
+
+  <section class="alt">
+    <div class="wrap">
+      <div class="eyebrow">What's inside</div>
+      <h2>Tools to learn, not tips to follow</h2>
+      <p class="sec-lead">You decide what to look at and which rules to test. The app shows you the data and lets you practise.</p>
+      <div class="grid">
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg></div>
+          <h3>Market overview</h3>
+          <p>NIFTY, BANK NIFTY, SENSEX and India VIX, with market breadth, in one calm view.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M7 12h10"/><path d="M10 19h4"/></svg></div>
+          <h3>Your own screeners</h3>
+          <p>Filter stocks by rules you choose, and see exactly why each one matched.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 14l3-3 2 2 5-5"/></svg></div>
+          <h3>Charts and news</h3>
+          <p>Clean price charts with indicators, market headlines and a personal watchlist.</p>
+        </div>
+        <div class="feature">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
+          <h3>Paper trading</h3>
+          <p>Practise with pretend money, with a stop-loss on every trade and a clear risk view.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="eyebrow">Getting started</div>
+      <h2>Three simple steps</h2>
+      <p class="sec-lead">It takes about a minute.</p>
+      <div class="steps">
+        <div class="step"><h3>Get an invite code</h3><p>Ask the person who shared this site with you.</p></div>
+        <div class="step"><h3>Create your account</h3><p>Pick a username and a password of at least 8 characters.</p></div>
+        <div class="step"><h3>Explore and practise</h3><p>Start with the market overview, then try a paper trade.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="alt">
+    <div class="wrap">
+      <div class="notice">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 16H3z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>
+        <div>
+          <h3>Please read before you start</h3>
+          <ul>
+            <li>This is a private test project for learning. It is not a public service.</li>
+            <li>Paper trading only: no real money and no real orders, ever.</li>
+            <li>Prices are delayed and unofficial, and may be wrong.</li>
+            <li>Nothing here is investment advice. The owner is not SEBI-registered.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <h2>Ready to explore?</h2>
+      <div class="cta">
+        <a class="btn primary lg" href="/signup" data-signup>Create account</a>
+        <a class="btn lg" href="/login">Sign in</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <span>AI Traded · private beta</span>
+      <span>Not investment advice · paper trading only</span>
+    </div>
+  </footer>
+
+  <script>
+    document.getElementById("theme").addEventListener("click", () => {
+      const cur = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      document.documentElement.dataset.theme = cur;
+      try { localStorage.setItem("theme", cur); } catch { }
+    });
+    // if the owner turned sign-up off, send "Create account" buttons to sign in instead
+    fetch("/api/auth/me").then((r) => r.json()).then((d) => {
+      if (!d.signup_enabled) document.querySelectorAll("[data-signup]").forEach((a) => {
+        a.href = "/login"; a.textContent = "Sign in";
+      });
+    }).catch(() => { });
+  </script>
+</body>
+</html>

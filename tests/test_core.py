@@ -222,3 +222,59 @@ class Quotes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAuth(unittest.TestCase):
+    """Invite-only login: sessions, fixed accounts and self-created accounts."""
+
+    def setUp(self):
+        from backend import auth
+        self.auth = auth
+        self._saved = (auth.USERS, auth.INVITE_CODE, auth.SIGNUP_ENABLED)
+        auth.USERS = {"owner": "fixed-password-1"}
+        auth.INVITE_CODE, auth.SIGNUP_ENABLED = "join-me", True
+        db.db()
+        db.x("DELETE FROM users")
+
+    def tearDown(self):
+        self.auth.USERS, self.auth.INVITE_CODE, self.auth.SIGNUP_ENABLED = self._saved
+
+    def test_fixed_account_and_token(self):
+        a = self.auth
+        self.assertEqual(a.check_password("Owner", "fixed-password-1"), "owner")
+        self.assertIsNone(a.check_password("owner", "wrong"))
+        self.assertIsNone(a.check_password("nobody", "x"))
+        tok = a.make_token("owner")
+        self.assertEqual(a.read_token(tok), "owner")
+        self.assertIsNone(a.read_token(tok[:-4] + "AAAA"))           # tampered
+        self.assertIsNone(a.read_token(a.make_token("owner", now=1)))  # expired
+        self.assertIsNone(a.read_token("not-a-token"))
+
+    def test_signup_rules(self):
+        a = self.auth
+        self.assertIn("invite", a.create_user("friend1", "password123", "wrong")[1])
+        self.assertIsNotNone(a.create_user("x", "password123", "join-me")[1])        # name too short
+        self.assertIsNotNone(a.create_user("friend1", "short", "join-me")[1])        # password too short
+        self.assertIsNotNone(a.create_user("owner", "password123", "join-me")[1])    # taken by fixed account
+        self.assertEqual(a.create_user("Friend1", "password123", "join-me"), ("friend1", None))
+        self.assertIsNotNone(a.create_user("friend1", "password123", "join-me")[1])  # duplicate
+        row = db.q("SELECT pw_hash FROM users WHERE username='friend1'", one=True)
+        self.assertNotIn("password123", row["pw_hash"])                             # stored hashed
+        self.assertEqual(a.check_password("friend1", "password123"), "friend1")
+        self.assertIsNone(a.check_password("friend1", "password124"))
+        self.assertEqual(a.read_token(a.make_token("friend1")), "friend1")
+
+    def test_signup_off_without_invite_code(self):
+        a = self.auth
+        a.SIGNUP_ENABLED = False
+        self.assertIsNotNone(a.create_user("friend2", "password123", "join-me")[1])
+
+    def test_rate_limit(self):
+        a = self.auth
+        ip = "203.0.113.9"
+        a.clear_fails(ip)
+        for _ in range(a.MAX_FAILS):
+            a.record_fail(ip)
+        self.assertTrue(a.too_many_fails(ip))
+        a.clear_fails(ip)
+        self.assertFalse(a.too_many_fails(ip))

@@ -10,11 +10,11 @@ import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import alerts, config, db, paper, services
+from . import alerts, auth, config, db, paper, services
 from .analysis import fundamentals
 from .market import calendar as cal
 from .market import universe, yahoo
@@ -87,6 +87,31 @@ async def no_stale_assets(request, call_next):
     return resp
 
 
+_LOCKED_PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Traded</title><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0f14;
+color:#e6edf3;font:15px/1.5 system-ui,sans-serif;text-align:center;padding:16px"><div><h1 style="font-size:20px">
+AI Traded is private</h1><p style="color:#8b9bb0">This is an invite-only test site.</p></div></body>"""
+
+
+def _private(resp):
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"  # keep the private beta out of search engines
+    return resp
+
+
+@app.middleware("http")
+async def require_login(request, call_next):
+    """Invite-only gate: every page and API call needs a valid session (see backend/auth.py)."""
+    path = request.url.path
+    if auth.LOCKED and path != "/robots.txt":
+        return _private(HTMLResponse(_LOCKED_PAGE, status_code=503))
+    if auth.ENABLED and path not in auth.PUBLIC_PATHS:
+        if not auth.current_user(request):
+            if path.startswith("/api/"):
+                return _private(JSONResponse({"error": "Please log in.", "login": True}, status_code=401))
+            return _private(RedirectResponse("/login", status_code=303))
+    return _private(await call_next(request))
+
+
 @app.exception_handler(yahoo.DataError)
 async def data_error(_, exc):
     return JSONResponse(status_code=503, content={"error": "Market data unavailable: %s" % exc,
@@ -95,6 +120,77 @@ async def data_error(_, exc):
 
 async def run(fn, *a, **kw):
     return await asyncio.to_thread(fn, *a, **kw)
+
+
+# ---------------------------------------------------------------- login (invite-only)
+
+def _page(name):
+    return FileResponse(Path(WEB) / name, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/login")
+async def login_page(request: Request):
+    if not auth.ENABLED or auth.current_user(request):
+        return RedirectResponse("/", status_code=303)
+    return _page("login.html")
+
+
+@app.get("/signup")
+async def signup_page(request: Request):
+    if not auth.ENABLED or auth.current_user(request):
+        return RedirectResponse("/", status_code=303)
+    return _page("login.html")  # same page, sign-up mode (chosen by the URL)
+
+
+TOO_MANY = "Too many attempts. Please wait 15 minutes and try again."
+
+
+@app.post("/api/auth/login")
+async def login(request: Request, body: dict = Body(...)):
+    if not auth.ENABLED:
+        return {"ok": True, "user": None}
+    ip = auth.client_ip(request)
+    if auth.too_many_fails(ip):
+        return JSONResponse({"error": TOO_MANY}, status_code=429)
+    user = await run(auth.check_password, body.get("username"), body.get("password"))
+    if not user:
+        auth.record_fail(ip)
+        return JSONResponse({"error": "Wrong username or password."}, status_code=401)
+    auth.clear_fails(ip)
+    resp = JSONResponse({"ok": True, "user": user})
+    auth.set_session(resp, request, user)
+    return resp
+
+
+@app.post("/api/auth/signup")
+async def signup(request: Request, body: dict = Body(...)):
+    ip = auth.client_ip(request)
+    if auth.too_many_fails(ip):
+        return JSONResponse({"error": TOO_MANY}, status_code=429)
+    user, error = await run(auth.create_user, body.get("username"), body.get("password"), body.get("invite"))
+    if error:
+        auth.record_fail(ip)
+        return JSONResponse({"error": error}, status_code=400)
+    resp = JSONResponse({"ok": True, "user": user})
+    auth.set_session(resp, request, user)
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+async def me(request: Request):
+    return {"auth_enabled": auth.ENABLED, "signup_enabled": auth.SIGNUP_ENABLED, "user": auth.current_user(request)}
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots():
+    return "User-agent: *\nDisallow: /\n"
 
 
 # ---------------------------------------------------------------- status
@@ -381,5 +477,7 @@ app.mount("/static", StaticFiles(directory=WEB), name="static")
 
 
 @app.get("/")
-async def index():
-    return FileResponse(Path(WEB) / "index.html")
+async def index(request: Request):
+    if auth.ENABLED and not auth.current_user(request):
+        return _page("home.html")  # logged out: the public home page
+    return _page("index.html")

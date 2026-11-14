@@ -1,6 +1,11 @@
 # Render Blueprint: free web service built from the Dockerfile.
 # Render sets PORT; the app listens on it (see backend/config.py).
-# Free tier: sleeps after ~15 min idle, and data/ (paper trades) resets on each restart or deploy.
+# Free tier: sleeps after ~15 min idle, and data/ (paper trades AND created accounts) resets on each restart or deploy.
+#
+# Private beta login (backend/auth.py). Set the two "sync: false" values in Render -> ai-traded -> Environment:
+#   TRADER_INVITE_CODE  the code friends type on "Create account"
+#   TRADER_USERS        optional fixed accounts that survive restarts, e.g.  yourname:long-password
+# If neither is set, the hosted site stays locked.
 services:
   - type: web
     name: ai-traded
@@ -10,3 +15,9 @@ services:
     envVars:
       - key: TRADER_BACKGROUND_UNIVERSE
         value: nifty100
+      - key: TRADER_SECRET_KEY
+        generateValue: true
+      - key: TRADER_INVITE_CODE
+        sync: false
+      - key: TRADER_USERS
+        sync: false

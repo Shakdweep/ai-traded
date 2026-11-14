@@ -15,6 +15,7 @@ async function api(path, opts = {}) {
   });
   let data = null;
   try { data = await r.json(); } catch { data = null; }
+  if (r.status === 401 && data && data.login) { location.href = "/login"; throw new Error("Please log in."); }
   if (!r.ok) throw new Error((data && (data.detail || data.error)) || ("HTTP " + r.status));
   return data;
 }
@@ -146,6 +147,18 @@ $("#theme-btn").addEventListener("click", () => {
   route();
 });
 try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch { }
+
+// signed-in user + log out (only shown when the invite-only login is on)
+api("/auth/me").then((d) => {
+  if (!d || !d.auth_enabled || !d.user) return;
+  $("#user-name").textContent = d.user;
+  $("#user-av").textContent = d.user.slice(0, 1).toUpperCase();
+  $("#user-box").hidden = false;
+}).catch(() => { });
+$("#logout-btn").addEventListener("click", async () => {
+  try { await api("/auth/logout", { method: "POST" }); } catch { }
+  location.href = "/";
+});
 
 // ------------------------------------------------------------------ shared tables
 function scanTable(rows, opts = {}) {
