@@ -168,15 +168,20 @@ def _signed_in(request, user):
     return resp
 
 
-async def _guarded(request, fn, *args, count_success=False):
-    """Run an auth step with the per-IP brute-force guard. fn returns (value, error)."""
-    ip = auth.client_ip(request)
-    if auth.too_many_fails(ip):
+def _guard_key(kind, ident):
+    """Failures are counted per account (mobile/email/username) and action, NOT per IP:
+    on Render many visitors can share one address, and one person's typos must not lock
+    everyone else out. Emailed codes have their own per-address limits (auth._can_send)."""
+    return "%s|%s" % (kind, auth.login_id(str(ident or "")) or "-")
+
+
+async def _guarded(key, fn, *args):
+    """Run an auth step behind the brute-force guard. fn returns (value, error)."""
+    if auth.too_many_fails(key):
         return None, JSONResponse({"error": TOO_MANY}, status_code=429)
     value, error = await run(fn, *args)
-    if error or count_success:  # sending an email also counts, so codes can't be sprayed
-        auth.record_fail(ip)
     if error:
+        auth.record_fail(key)
         return None, JSONResponse({"error": error}, status_code=400)
     return value, None
 
@@ -185,15 +190,15 @@ async def _guarded(request, fn, *args, count_success=False):
 async def login(request: Request, body: dict = Body(...)):
     if not auth.ENABLED:
         return {"ok": True, "user": None}
-    ip = auth.client_ip(request)
-    if auth.too_many_fails(ip):
-        return JSONResponse({"error": TOO_MANY}, status_code=429)
     ident = body.get("email") or body.get("username")
+    key = _guard_key("login", ident)
+    if auth.too_many_fails(key):
+        return JSONResponse({"error": TOO_MANY}, status_code=429)
     user = await run(auth.check_password, ident, body.get("password"))
     if not user:
-        auth.record_fail(ip)
+        auth.record_fail(key)
         return JSONResponse({"error": "Wrong email/mobile number or password."}, status_code=401)
-    auth.clear_fails(ip)
+    auth.clear_fails(key)
     if await run(auth.account_status, user) == "pending":
         return JSONResponse({"error": "Your account is still waiting for approval. You can sign in as soon as the "
                                       "person who invited you approves it.", "pending": True}, status_code=403)
@@ -202,33 +207,35 @@ async def login(request: Request, body: dict = Body(...)):
 
 @app.post("/api/auth/signup/start")
 async def signup_start(request: Request, body: dict = Body(...)):
-    masked, err = await _guarded(request, auth.signup_start, body.get("name"), body.get("email"),
-                                 body.get("password"), body.get("invite"), count_success=True)
+    masked, err = await _guarded(_guard_key("signup", body.get("email")), auth.signup_start, body.get("name"),
+                                 body.get("email"), body.get("password"), body.get("invite"))
     return err or {"ok": True, "sent_to": masked}
 
 
 @app.post("/api/auth/signup/verify")
 async def signup_verify(request: Request, body: dict = Body(...)):
-    user, err = await _guarded(request, auth.signup_verify, body.get("email"), body.get("code"))
+    user, err = await _guarded(_guard_key("verify", body.get("email")), auth.signup_verify, body.get("email"),
+                               body.get("code"))
     return err or _signed_in(request, user)
 
 
 @app.post("/api/auth/signup/phone")
 async def signup_phone(request: Request, body: dict = Body(...)):
-    user, err = await _guarded(request, auth.phone_signup, body.get("name"), body.get("phone"),
-                               body.get("password"), body.get("invite"), None, body.get("email"), count_success=True)
+    user, err = await _guarded(_guard_key("signup", body.get("phone")), auth.phone_signup, body.get("name"),
+                               body.get("phone"), body.get("password"), body.get("invite"), None, body.get("email"))
     return err or _signed_in(request, user)
 
 
 @app.post("/api/auth/forgot/start")
 async def forgot_start(request: Request, body: dict = Body(...)):
-    masked, err = await _guarded(request, auth.forgot_start, body.get("email"), count_success=True)
+    masked, err = await _guarded(_guard_key("forgot", body.get("email")), auth.forgot_start, body.get("email"))
     return err or {"ok": True, "sent_to": masked}
 
 
 @app.post("/api/auth/forgot/verify")
 async def forgot_verify(request: Request, body: dict = Body(...)):
-    user, err = await _guarded(request, auth.forgot_verify, body.get("email"), body.get("code"), body.get("password"))
+    user, err = await _guarded(_guard_key("reset", body.get("email")), auth.forgot_verify, body.get("email"),
+                               body.get("code"), body.get("password"))
     return err or _signed_in(request, user)
 
 
