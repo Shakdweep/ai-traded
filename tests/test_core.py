@@ -292,3 +292,39 @@ class TestAuth(unittest.TestCase):
         self.assertTrue(a.too_many_fails(ip))
         a.clear_fails(ip)
         self.assertFalse(a.too_many_fails(ip))
+
+
+class TestPostgresTranslation(unittest.TestCase):
+    """The SQL used with SQLite is translated for Postgres (Neon) when DATABASE_URL is set."""
+
+    def test_schema_types(self):
+        s = db.pg_schema()
+        self.assertNotIn("AUTOINCREMENT", s)
+        self.assertEqual(s.count("BIGSERIAL PRIMARY KEY"), db.SCHEMA.count("AUTOINCREMENT"))
+        self.assertNotIn(" REAL", s)  # REAL is 4-byte in Postgres: timestamps would lose seconds
+        self.assertIn("ts DOUBLE PRECISION NOT NULL", s)
+
+    def test_placeholders_and_ids(self):
+        self.assertEqual(db.pg_sql("SELECT * FROM a WHERE x=? AND y LIKE '5%'"),
+                         "SELECT * FROM a WHERE x=%s AND y LIKE '5%%'")
+        self.assertTrue(db._returns_id("INSERT INTO paper_orders(ts) VALUES(?)"))
+        self.assertTrue(db._returns_id("  insert into alerts(ts) values(?)"))
+        self.assertFalse(db._returns_id("INSERT INTO users(username) VALUES(?)"))
+        self.assertFalse(db._returns_id("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=1"))
+        self.assertFalse(db._returns_id("UPDATE alerts SET seen=1"))
+
+    def test_sqlite_still_works_for_upsert_and_batch(self):
+        db.db()
+        db.x("DELETE FROM watchlist")
+        sql = ("INSERT INTO watchlist(symbol, added_at, note, mode) VALUES(?,?,?,?) "
+               "ON CONFLICT(symbol) DO UPDATE SET added_at=excluded.added_at, note=excluded.note, mode=excluded.mode")
+        db.x(sql, ("INFY", 1.0, "a", "swing"))
+        db.x(sql, ("INFY", 2.0, "b", "intraday"))
+        rows = db.q("SELECT * FROM watchlist")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["note"], rows[0]["mode"]), ("b", "intraday"))
+        db.x("DELETE FROM signals")
+        db.xmany("INSERT INTO signals(ts, symbol, mode, rating) VALUES(?,?,?,?)",
+                 [(1.0, "A", "swing", "WAIT"), (2.0, "B", "swing", "WAIT")])
+        self.assertEqual(len(db.q("SELECT * FROM signals")), 2)
+        db.xmany("INSERT INTO signals(ts, symbol, mode, rating) VALUES(?,?,?,?)", [])  # no-op

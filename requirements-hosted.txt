@@ -1,0 +1,3 @@
+# Extra packages for the hosted (Docker/Render) build only.
+# Postgres driver, used when DATABASE_URL is set (a Neon project just for AI Traded).
+psycopg[binary]==3.2.13

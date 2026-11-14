@@ -1,7 +1,17 @@
-"""SQLite storage: settings, watchlist, signal history, alerts, paper trading and
-journal. Standard library only; one file in data/trader.db."""
+"""Storage: settings, watchlist, signal history, alerts, paper trading, journal and
+accounts.
+
+- On your own PC: SQLite, one file in data/trader.db (standard library only).
+- When DATABASE_URL is set (the hosted site): Postgres, e.g. a Neon project created
+  just for AI Traded. Data then survives restarts and redeploys.
+
+All SQL is written once with "?" placeholders; for Postgres it is translated to "%s"
+and the schema types are mapped (REAL -> DOUBLE PRECISION, AUTOINCREMENT -> BIGSERIAL).
+"""
 
 import json
+import os
+import re
 import sqlite3
 import threading
 import time
@@ -9,6 +19,11 @@ import time
 from .config import DB_PATH
 
 _lock = threading.RLock()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USING_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
+# tables whose INSERTs return the new row id
+_ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -36,6 +51,7 @@ CREATE TABLE IF NOT EXISTS journal (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, symbol TEXT, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (
   username TEXT PRIMARY KEY, pw_hash TEXT NOT NULL, salt TEXT NOT NULL, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS signals_ts ON signals(ts);
 """
 
 DEFAULT_SETTINGS = {
@@ -59,7 +75,39 @@ DEFAULT_SETTINGS = {
 }
 
 
+def pg_schema(schema=SCHEMA):
+    """The SQLite schema in Postgres types (REAL is only 4 bytes in Postgres, so timestamps need DOUBLE)."""
+    out = schema.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+    return re.sub(r"\bREAL\b", "DOUBLE PRECISION", out)
+
+
+def pg_sql(sql):
+    """'?' placeholders -> '%s' (and escape any literal '%')."""
+    return sql.replace("%", "%%").replace("?", "%s")
+
+
+def _returns_id(sql):
+    m = re.match(r"\s*INSERT\s+INTO\s+(\w+)", sql, re.I)
+    return bool(m and m.group(1).lower() in _ID_TABLES and "RETURNING" not in sql.upper())
+
+
+if USING_POSTGRES:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    IntegrityError = (sqlite3.IntegrityError, psycopg.errors.IntegrityError)
+    _RETRY = (psycopg.OperationalError, psycopg.InterfaceError)
+else:
+    IntegrityError = (sqlite3.IntegrityError,)
+    _RETRY = ()
+
+
 def conn():
+    if USING_POSTGRES:
+        # autocommit: every statement stands alone, like the SQLite code expects;
+        # prepare_threshold=None keeps it safe behind Neon's pooled (PgBouncer) endpoint
+        return psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row, prepare_threshold=None,
+                               connect_timeout=15, keepalives=1, keepalives_idle=60)
     c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     c.row_factory = sqlite3.Row
     return c
@@ -72,24 +120,71 @@ def db():
     global _conn
     with _lock:
         if _conn is None:
-            _conn = conn()
-            _conn.executescript(SCHEMA)
-            _conn.commit()
+            c = conn()
+            if USING_POSTGRES:
+                for stmt in filter(str.strip, pg_schema().split(";")):
+                    c.execute(stmt)
+            else:
+                c.executescript(SCHEMA)
+                c.commit()
+            _conn = c
         return _conn
 
 
-def q(sql, args=(), one=False):
+def _run(fn):
+    """Run fn(connection); on Postgres, reconnect once if the connection dropped
+    (Neon closes idle connections when its compute sleeps)."""
+    global _conn
     with _lock:
-        cur = db().execute(sql, args)
-        rows = [dict(r) for r in cur.fetchall()]
+        try:
+            return fn(db())
+        except _RETRY:
+            try:
+                _conn.close()
+            except Exception:  # noqa: BLE001 - it is already broken
+                pass
+            _conn = None
+            return fn(db())
+
+
+def q(sql, args=(), one=False):
+    def go(c):
+        cur = c.execute(pg_sql(sql) if USING_POSTGRES else sql, args)
+        return [dict(r) for r in cur.fetchall()]
+    rows = _run(go)
     return (rows[0] if rows else None) if one else rows
 
 
 def x(sql, args=()):
-    with _lock:
-        cur = db().execute(sql, args)
-        db().commit()
+    def go(c):
+        if USING_POSTGRES:
+            want_id = _returns_id(sql)
+            cur = c.execute(pg_sql(sql + (" RETURNING id" if want_id else "")), args)
+            return cur.fetchone()["id"] if want_id else None
+        cur = c.execute(sql, args)
+        c.commit()
         return cur.lastrowid
+    return _run(go)
+
+
+def xmany(sql, rows):
+    """Insert/update many rows in one round trip (scans write ~100 signal rows at once)."""
+    rows = list(rows)
+    if not rows:
+        return
+
+    def go(c):
+        if USING_POSTGRES:
+            with c.cursor() as cur:
+                cur.executemany(pg_sql(sql), rows)
+        else:
+            c.executemany(sql, rows)
+            c.commit()
+    _run(go)
+
+
+def backend_name():
+    return "postgres" if USING_POSTGRES else "sqlite"
 
 
 def get_settings():
@@ -118,5 +213,5 @@ def add_alert(symbol, kind, message, level="info", dedupe=None):
     try:
         return x("INSERT INTO alerts(ts, symbol, kind, message, level, dedupe) VALUES(?,?,?,?,?,?)",
                  (time.time(), symbol, kind, message, level, dedupe))
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         return None

@@ -15,6 +15,7 @@ from .news import feeds
 
 SCANS = {}      # (universe, mode) -> result
 _scan_lock = threading.Lock()
+SIGNAL_KEEP_DAYS = 90  # rating history kept per stock
 _running = set()
 
 
@@ -95,12 +96,12 @@ def run_scan(key="nifty100", mode="swing", symbols=None):
                 rows.append(_row(a, plan, m))
             except Exception as e:  # noqa: BLE001 - one bad series never sinks the scan
                 errors[ys] = "analysis failed: %s" % str(e)[:120]
-        for r in rows:
-            if r["rating"] != "INSUFFICIENT DATA":
-                db.x("INSERT INTO signals(ts, symbol, mode, rating, score, confidence, price, setups, data_ts) "
-                     "VALUES(?,?,?,?,?,?,?,?,?)",
-                     (time.time(), r["symbol"], mode, r["rating"], r["score"], r["confidence"], r["price"],
-                      ",".join(r["setups"]), time.time()))
+        now = time.time()
+        db.xmany("INSERT INTO signals(ts, symbol, mode, rating, score, confidence, price, setups, data_ts) "
+                 "VALUES(?,?,?,?,?,?,?,?,?)",
+                 [(now, r["symbol"], mode, r["rating"], r["score"], r["confidence"], r["price"],
+                   ",".join(r["setups"]), now) for r in rows if r["rating"] != "INSUFFICIENT DATA"])
+        db.x("DELETE FROM signals WHERE ts < ?", (now - SIGNAL_KEEP_DAYS * 86400,))  # keep the history small
         res = {"universe": key, "title": title, "mode": mode, "rows": rows, "errors": errors,
                "scanned": len(stocks), "analysed": len(rows), "started": t0, "finished": time.time(),
                "finished_ist": cal.now_ist().strftime("%d %b %Y %H:%M:%S IST"),

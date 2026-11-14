@@ -216,6 +216,7 @@ async def status():
                    "restored": bool(v.get("restored_from_disk")), "analysed": v.get("analysed"),
                    "errors": len(v.get("errors", {}))} for (k, m), v in services.SCANS.items()],
         "running": [list(x) for x in services._running],
+        "storage": db.backend_name(),  # "postgres" when DATABASE_URL is set, else "sqlite"
         "paper_only": True,
     }
 
@@ -357,7 +358,8 @@ async def watch_add(body: dict = Body(...)):
         await run(yahoo.chart, yahoo.to_yahoo(sym), "5d", "1d")
     except yahoo.DataError:
         raise HTTPException(404, "No market data for %s on NSE" % sym)
-    db.x("INSERT OR REPLACE INTO watchlist(symbol, added_at, note, mode) VALUES(?,?,?,?)",
+    db.x("INSERT INTO watchlist(symbol, added_at, note, mode) VALUES(?,?,?,?) "
+         "ON CONFLICT(symbol) DO UPDATE SET added_at=excluded.added_at, note=excluded.note, mode=excluded.mode",
          (sym, time.time(), body.get("note", ""), body.get("mode", "swing")))
     syms = [r["symbol"] for r in db.q("SELECT symbol FROM watchlist")]
     threading.Thread(target=services.run_scan, args=("watchlist", "swing", syms), daemon=True).start()
