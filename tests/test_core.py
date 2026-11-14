@@ -240,7 +240,7 @@ class TestAuth(unittest.TestCase):
         self.outbox = []
         mailer.send = lambda to, subject, text, html: self.outbox.append((to, subject, text))
         db.db()
-        for t in ("users", "accounts", "email_codes"):
+        for t in ("users", "accounts", "email_codes", "invites"):
             db.x("DELETE FROM %s" % t)
 
     def tearDown(self):
@@ -297,6 +297,9 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(a.signup_verify("ravi@example.com", code), ("ravi@example.com", None))
         acct = a.get_account("ravi@example.com")
         self.assertEqual(acct["name"], "Ravi Kumar")
+        self.assertEqual(acct["status"], "pending")
+        self.assertIsNone(a.read_token(a.make_token("ravi@example.com")))  # no session while pending
+        self.assertTrue(a.approve("ravi@example.com"))
         self.assertIn("expired", a.signup_verify("ravi@example.com", code)[1])  # one use only
         self.assertEqual(a.check_password("RAVI@example.com", "password123"), "ravi@example.com")
         self.assertIsNone(a.check_password("ravi@example.com", "password124"))
@@ -332,6 +335,7 @@ class TestAuth(unittest.TestCase):
         a = self.auth
         a.signup_start("Meera", "meera@example.com", "old-password", "join-me")
         a.signup_verify("meera@example.com", self.last_code())
+        a.approve("meera@example.com")
         old_session = a.make_token("meera@example.com", now=time.time() - 60)
         self.assertEqual(a.read_token(old_session), "meera@example.com")
         # unknown email: same answer, but no email is sent
@@ -382,6 +386,10 @@ class TestPhoneAccounts(TestAuth):
         self.assertIn("8", a.phone_signup("Kiran", "9876543210", "short", "join-me")[1])
         self.assertEqual(a.phone_signup(" Kiran  R ", "98765 43210", "password123", "join-me"), ("+919876543210", None))
         self.assertEqual(self.outbox, [])  # no OTP
+        self.assertEqual(a.account_status("+919876543210"), "pending")
+        self.assertIsNone(a.read_token(a.make_token("+919876543210")))
+        a.approve("+919876543210")
+        self.assertEqual(a.account_status("+919876543210"), "active")
         self.assertIn("already exists", a.phone_signup("K", "+91 98765 43210", "password123", "join-me")[1])
         for typed in ("9876543210", "+91 98765 43210", "09876543210"):
             self.assertEqual(a.check_password(typed, "password123"), "+919876543210", typed)
@@ -393,6 +401,7 @@ class TestPhoneAccounts(TestAuth):
     def test_owner_tools(self):
         a = self.auth
         a.phone_signup("Dev", "9123456789", "password123", "join-me")
+        a.approve("+919123456789")
         self.assertTrue(a.is_owner("owner"))
         self.assertFalse(a.is_owner("+919123456789"))
         self.assertFalse(a.is_owner(None))
@@ -407,6 +416,104 @@ class TestPhoneAccounts(TestAuth):
         self.assertTrue(a.owner_remove("+919123456789"))
         self.assertIsNone(a.check_password("9123456789", temp))
         self.assertFalse(a.owner_remove("+919123456789"))
+
+
+class TestInvitesAndApproval(TestAuth):
+    """Single-use invite codes, owner approval, optional email for password reset."""
+
+    def test_single_use_codes(self):
+        a = self.auth
+        a.INVITE_CODE = ""  # no shared code: only personal codes work
+        self.assertIn("invite", a.phone_signup("X", "9000000001", "password123", "join-me")[1])
+        code = a.create_invite("Rahul")
+        self.assertRegex(code, r"^ait-[a-z2-9]{4}-[a-z2-9]{4}$")
+        row = db.q("SELECT * FROM invites", one=True)
+        self.assertNotIn(code, row["code_hash"])  # stored hashed
+        self.assertEqual((row["hint"], row["note"]), (code[-4:], "Rahul"))
+        self.assertEqual(a.phone_signup("Rahul", "9000000001", "password123", code.upper()), ("+919000000001", None))
+        self.assertEqual(a.list_invites()[0]["used_by"], "+919000000001")
+        self.assertIn("already been used", a.phone_signup("Y", "9000000002", "password123", code)[1])
+        self.assertIsNone(a.get_account("+919000000002"))
+        acct = a.list_accounts()[0]
+        self.assertEqual((acct["status"], acct["invite_note"]), ("pending", "Rahul"))
+        self.assertFalse(a.revoke_invite(row["id"]))  # used codes can't be cancelled
+        code2 = a.create_invite("")
+        inv2 = [i for i in a.list_invites() if i["hint"] == code2[-4:]][0]
+        self.assertTrue(a.revoke_invite(inv2["id"]))
+        self.assertIn("invite", a.phone_signup("Z", "9000000003", "password123", code2)[1])
+
+    def test_email_signup_uses_invite_once(self):
+        a = self.auth
+        a.INVITE_CODE = ""
+        code = a.create_invite("Sam")
+        self.assertIsNone(a.signup_start("Sam", "sam@example.com", "password123", code)[1])
+        sam_code = self.last_code()
+        # someone else uses the same invite first (mobile) -> the email confirmation is refused
+        self.assertIsNone(a.phone_signup("Other", "9000000009", "password123", code)[1])
+        self.assertIn("already been used", a.signup_verify("sam@example.com", sam_code)[1])
+        self.assertIsNone(a.get_account("sam@example.com"))
+
+    def test_pending_login_and_owner_active(self):
+        a = self.auth
+        a.phone_signup("P", "9000000004", "password123", "join-me")
+        self.assertEqual(a.check_password("9000000004", "password123"), "+919000000004")  # password is right ...
+        self.assertEqual(a.account_status("+919000000004"), "pending")                  # ... but not approved yet
+        self.assertEqual(a.account_status("owner"), "active")
+        self.assertIsNone(a.account_status("nobody"))
+        self.assertFalse(a.approve("+910000000000"))
+
+    def test_optional_email_lets_mobile_users_reset(self):
+        a = self.auth
+        self.assertIn("email", a.phone_signup("Q", "9000000005", "password123", "join-me", contact_email="bad@")[1])
+        self.assertIsNone(a.phone_signup("Q", "9000000005", "password123", "join-me", contact_email="Q@Example.com")[1])
+        a.approve("+919000000005")
+        self.assertIsNone(a.forgot_start("q@example.com")[1])
+        self.assertEqual(self.outbox[-1][0], "q@example.com")
+        self.assertEqual(a.forgot_verify("q@example.com", self.last_code(), "new-password-9"), ("+919000000005", None))
+        self.assertEqual(a.check_password("9000000005", "new-password-9"), "+919000000005")
+
+
+class TestPerUserData(unittest.TestCase):
+    """Each person has their own settings, watchlist, alerts and paper account."""
+
+    def setUp(self):
+        db.db()
+        for t in ("user_settings", "user_watchlist", "alerts", "paper_orders", "paper_positions", "journal"):
+            db.x("DELETE FROM %s" % t)
+
+    def test_settings_are_separate(self):
+        with db.as_owner("+911111111111"):
+            db.save_settings({"capital": 50000.0, "cash": 50000.0})
+            self.assertEqual(db.get_settings()["capital"], 50000.0)
+        with db.as_owner("+922222222222"):
+            self.assertEqual(db.get_settings()["capital"], 100000.0)  # defaults for a new person
+        self.assertEqual(db.owner(), "")  # context restored
+
+    def test_alerts_and_paper_are_separate(self):
+        from backend import alerts, paper
+        for who, sym in (("a@x.com", "INFY"), ("b@x.com", "TCS")):
+            with db.as_owner(who):
+                db.x("INSERT INTO user_watchlist(owner, symbol, added_at) VALUES(?,?,?)", (who, sym, 1.0))
+                alerts.notify(sym, "test", "hello " + sym)
+                alerts.notify(sym, "test", "hello again " + sym)  # rings once per person
+                db.x("INSERT INTO paper_positions(order_id, symbol, qty, entry_price, stop, mode, opened_at, owner) "
+                     "VALUES(NULL,?,?,?,?,?,?,?)", (sym, 1, 100.0, 90.0, "swing", 1.0, who))
+        self.assertEqual(alerts.watchers(), {"a@x.com": {"INFY"}, "b@x.com": {"TCS"}})
+        with db.as_owner("a@x.com"):
+            self.assertEqual([r["symbol"] for r in alerts.recent()], ["INFY"])
+            alerts.mark_seen()
+        with db.as_owner("b@x.com"):
+            self.assertEqual([r["seen"] for r in alerts.recent()], [0])  # A's "mark seen" didn't touch B
+            self.assertEqual(paper._today_state()[1][0]["symbol"], "TCS")
+        self.assertEqual(sorted(paper.active_owners()), ["a@x.com", "b@x.com"])
+
+    def test_old_single_user_data_moves_to_local_owner(self):
+        db.x("DELETE FROM settings")
+        db.x("INSERT INTO settings(key, value) VALUES('capital', '77777.0')")
+        db._migrate(db.db())
+        self.assertEqual(db.get_settings("")["capital"], 77777.0)
+        db._migrate(db.db())  # running again changes nothing
+        self.assertEqual(len(db.q("SELECT * FROM user_settings WHERE owner='' AND key='capital'")), 1)
 
 
 class TestPostgresTranslation(unittest.TestCase):

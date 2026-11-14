@@ -703,22 +703,83 @@ async function viewStatus() {
 
 // ------------------------------------------------------------------ members (owner only)
 async function viewMembers() {
-  const d = await api("/admin/accounts");
+  const [d, inv] = await Promise.all([api("/admin/accounts"), api("/admin/invites")]);
   const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "–";
-  const rows = d.accounts.map((a) => `<tr>
-      <td><b>${esc(a.name)}</b></td><td class="mono">${esc(a.id)}</td>
-      <td>${when(a.created_at)}</td><td>${when(a.last_login)}</td>
-      <td class="n"><button class="btn sm" data-reset="${esc(a.id)}">Reset password</button>
-        <button class="btn sm bad" data-remove="${esc(a.id)}">Remove</button></td></tr>`).join("");
+  const pending = d.accounts.filter((a) => a.status === "pending");
+  const active = d.accounts.filter((a) => a.status !== "pending");
+  const who = (a) => `<b>${esc(a.name)}</b>${a.invite_note ? ` <span class="dim small">(invite: ${esc(a.invite_note)})</span>` : ""}`;
+  const contact = (a) => `<span class="mono">${esc(a.id)}</span>${a.contact_email ? `<div class="dim small">${esc(a.contact_email)}</div>` : ""}`;
+  const site = location.origin;
   app.innerHTML = `<div class="grid">
-    <div class="card"><h3>Members <span class="sub">${d.accounts.length} account${d.accounts.length === 1 ? "" : "s"}</span></h3>
-      <p class="muted" style="margin-top:0">People who created an account with the invite code. If someone forgets their password,
-        click <b>Reset password</b> and send them the temporary password privately. They can sign in with it straight away.</p>
+    ${pending.length ? `<div class="card hero"><h3>Waiting for your approval <span class="sub">${pending.length}</span></h3>
+      <div class="tablewrap"><table class="plain"><thead><tr><th>Name</th><th>Mobile / email</th><th>Signed up</th>
+        <th class="n">Actions</th></tr></thead><tbody>${pending.map((a) => `<tr><td>${who(a)}</td><td>${contact(a)}</td>
+        <td>${when(a.created_at)}</td><td class="n"><button class="btn sm good" data-approve="${esc(a.id)}">Approve</button>
+        <button class="btn sm bad" data-remove="${esc(a.id)}">Reject</button></td></tr>`).join("")}</tbody></table></div></div>` : ""}
+
+    <div class="card"><h3>Invite a friend</h3>
+      <p class="muted" style="margin-top:0">Create a personal code for each friend. Each code works <b>once</b>, and you'll see who used it.</p>
+      <form id="inv-form" class="row" style="align-items:flex-end">
+        <label class="f" style="flex:1;min-width:200px">Friend's name (just for you)<input id="inv-note" maxlength="60" placeholder="e.g. Rahul from college"></label>
+        <button class="btn primary" type="submit">Create invite code</button>
+      </form>
+      <div id="inv-result"></div>
+      ${inv.invites.length ? `<div class="tablewrap" style="margin-top:18px"><table class="plain"><thead><tr><th>For</th><th>Code ends</th>
+        <th>Created</th><th>Status</th><th class="n"></th></tr></thead><tbody>${inv.invites.map((i) => `<tr>
+        <td>${esc(i.note || "–")}</td><td class="mono">…${esc(i.hint)}</td><td>${when(i.created_at)}</td>
+        <td>${i.used_by ? `<span class="tag b">used by ${esc(i.used_by)}</span>` : i.revoked ? '<span class="tag">cancelled</span>' : '<span class="tag w">not used yet</span>'}</td>
+        <td class="n">${!i.used_by && !i.revoked ? `<button class="btn sm" data-revoke="${i.id}">Cancel code</button>` : ""}</td></tr>`).join("")}
+        </tbody></table></div>` : ""}
+    </div>
+
+    <div class="card"><h3>Members <span class="sub">${active.length} account${active.length === 1 ? "" : "s"}</span></h3>
+      <p class="muted" style="margin-top:0">If someone forgets their password, click <b>Reset password</b> and send them the
+        temporary password privately. They can sign in with it straight away.</p>
       <div id="m-result"></div>
-      ${d.accounts.length ? `<div class="tablewrap"><table class="plain"><thead><tr><th>Name</th><th>Email / mobile</th>
-        <th>Joined</th><th>Last sign-in</th><th class="n">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
-        : '<div class="empty">No members yet. Share the site link and invite code with your friends.</div>'}
+      ${active.length ? `<div class="tablewrap"><table class="plain"><thead><tr><th>Name</th><th>Mobile / email</th>
+        <th>Joined</th><th>Last sign-in</th><th class="n">Actions</th></tr></thead><tbody>${active.map((a) => `<tr>
+        <td>${who(a)}</td><td>${contact(a)}</td><td>${when(a.created_at)}</td><td>${when(a.last_login)}</td>
+        <td class="n"><button class="btn sm" data-reset="${esc(a.id)}">Reset password</button>
+        <button class="btn sm bad" data-remove="${esc(a.id)}">Remove</button></td></tr>`).join("")}</tbody></table></div>`
+        : '<div class="empty">No members yet. Create an invite code above and send it with the site link.</div>'}
     </div></div>`;
+
+  $("#inv-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const note = $("#inv-note").value.trim();
+    try {
+      const r = await api("/admin/invites", { method: "POST", body: { note } });
+      const msg = `Hey${note ? " " + note.split(" ")[0] : ""}! Join my private AI Traded beta (paper trading only, not investment advice): ${site}\n` +
+        `Tap "Create account" and use your personal invite code: ${r.code}`;
+      $("#inv-result").innerHTML = `<div class="card hero" style="margin-top:18px">
+        <b>Invite code${note ? " for " + esc(note) : ""}:</b>
+        <div class="mono" style="font-size:24px;margin:10px 0;user-select:all">${esc(r.code)}</div>
+        <div class="muted small" style="margin-bottom:10px">Shown only once. Message to send:</div>
+        <textarea id="inv-msg" rows="3" style="width:100%" readonly>${esc(msg)}</textarea>
+        <div class="row" style="margin-top:10px"><button class="btn sm" id="inv-copy">Copy message</button>
+          <a class="btn sm" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">Share on WhatsApp</a></div></div>`;
+      $("#inv-copy").onclick = async () => {
+        try { await navigator.clipboard.writeText(msg); $("#inv-copy").textContent = "Copied ✓"; }
+        catch { $("#inv-msg").select(); }
+      };
+      const keep = $("#inv-result").innerHTML;
+      await viewMembers();  // refresh the list, keep the new code on screen
+      $("#inv-result").innerHTML = keep;
+      $("#inv-copy").onclick = async () => {
+        try { await navigator.clipboard.writeText(msg); $("#inv-copy").textContent = "Copied ✓"; }
+        catch { $("#inv-msg").select(); }
+      };
+    } catch (err) { $("#inv-result").innerHTML = errorBox(err); }
+  };
+  app.querySelectorAll("[data-revoke]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Cancel this invite code? It will stop working.")) return;
+    try { await api("/admin/invites/revoke", { method: "POST", body: { id: Number(b.dataset.revoke) } }); viewMembers(); }
+    catch (e) { $("#inv-result").innerHTML = errorBox(e); }
+  });
+  app.querySelectorAll("[data-approve]").forEach((b) => b.onclick = async () => {
+    try { await api("/admin/approve", { method: "POST", body: { id: b.dataset.approve } }); viewMembers(); }
+    catch (e) { $("#m-result").innerHTML = errorBox(e); }
+  });
   app.querySelectorAll("[data-reset]").forEach((b) => b.onclick = async () => {
     const id = b.dataset.reset;
     if (!confirm("Give " + id + " a new temporary password? Their current password stops working.")) return;
@@ -732,8 +793,8 @@ async function viewMembers() {
   });
   app.querySelectorAll("[data-remove]").forEach((b) => b.onclick = async () => {
     const id = b.dataset.remove;
-    if (!confirm("Remove the account " + id + "? They will be signed out and can't sign in again.")) return;
-    try { await api("/admin/remove", { method: "POST", body: { id } }); route(); }
+    if (!confirm("Remove the account " + id + "? They can't sign in again (their invite code stays used).")) return;
+    try { await api("/admin/remove", { method: "POST", body: { id } }); viewMembers(); }
     catch (e) { $("#m-result").innerHTML = errorBox(e); }
   });
 }

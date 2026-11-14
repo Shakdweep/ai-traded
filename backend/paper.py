@@ -9,6 +9,8 @@ Flow (same three-gate idea as the trader-broker skill, adapted for paper):
      latest (delayed) quote plus slippage, only if it is still inside the entry range.
 Exits: stop, Target 1 (half off, stop to break-even), Target 2, the intraday
 square-off time, or a manual close. Checked against the latest quote each refresh.
+
+Every query is scoped to db.owner(): each person has their own paper account.
 """
 
 import json
@@ -41,9 +43,10 @@ def ticket_text(o):
 
 def _today_state():
     start, _ = rk.today_bounds()
-    opened = db.q("SELECT * FROM paper_positions WHERE opened_at >= ? AND order_id IS NOT NULL", (start,))
-    openpos = db.q("SELECT * FROM paper_positions WHERE status='open'")
-    closed = db.q("SELECT pnl FROM paper_positions WHERE status='closed' AND closed_at >= ?", (start,))
+    me = db.owner()
+    opened = db.q("SELECT * FROM paper_positions WHERE owner=? AND opened_at >= ? AND order_id IS NOT NULL", (me, start))
+    openpos = db.q("SELECT * FROM paper_positions WHERE owner=? AND status='open'", (me,))
+    closed = db.q("SELECT pnl FROM paper_positions WHERE owner=? AND status='closed' AND closed_at >= ?", (me, start))
     return opened, openpos, sum(r["pnl"] or 0 for r in closed)
 
 
@@ -61,11 +64,11 @@ def propose(plan, settings):
                                    "blockers")}
     pj["max_loss"] = pos.get("max_loss")
     oid = db.x("INSERT INTO paper_orders(ts, symbol, side, qty, entry, stop, target1, target2, mode, status, "
-               "risk_verdict, plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+               "risk_verdict, plan, owner) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (time.time(), order["symbol"], "buy", order["qty"], order["entry"], order["stop"], order["target1"],
                 plan.get("target2"), plan["mode"], "proposed" if verdict["verdict"] == "PASS" else "blocked",
-                json.dumps(verdict), json.dumps(pj)))
-    o = db.q("SELECT * FROM paper_orders WHERE id=?", (oid,), one=True)
+                json.dumps(verdict), json.dumps(pj), db.owner()))
+    o = db.q("SELECT * FROM paper_orders WHERE id=? AND owner=?", (oid, db.owner()), one=True)
     out = {"ok": verdict["verdict"] == "PASS", "order": o, "risk": verdict, "ticket": ticket_text(o)}
     if not plan.get("actionable"):
         out["warning"] = "This plan is not marked actionable: %s" % "; ".join(plan.get("blockers") or [])
@@ -73,12 +76,13 @@ def propose(plan, settings):
 
 
 def confirm(order_id, reply, settings):
-    o = db.q("SELECT * FROM paper_orders WHERE id=?", (order_id,), one=True)
+    o = db.q("SELECT * FROM paper_orders WHERE id=? AND owner=?", (order_id, db.owner()), one=True)
     if not o:
         return {"ok": False, "error": "No such order."}
     if o["status"] != "proposed":
         return {"ok": False, "error": "Order is %s, not awaiting your yes." % o["status"]}
-    others = [r["symbol"] for r in db.q("SELECT symbol FROM paper_orders WHERE status='proposed'")]
+    others = [r["symbol"] for r in db.q("SELECT symbol FROM paper_orders WHERE owner=? AND status='proposed'",
+                                        (db.owner(),))]
     ok, why = skill_ticket.parse_yes(reply, _alpaca_like(o), others)
     why = why.replace("$", "₹")
     if not ok:
@@ -129,20 +133,21 @@ def _fill(o, reply, settings):
         return {"ok": False, "error": "Price %.2f is at or below the stop %.2f. Setup invalid." % (px, o["stop"])}
     db.x("UPDATE paper_orders SET status='filled', approval=? WHERE id=?", (reply, order_id))
     pid = db.x("INSERT INTO paper_positions(order_id, symbol, qty, entry_price, stop, target1, target2, mode, "
-               "opened_at) VALUES(?,?,?,?,?,?,?,?,?)",
+               "opened_at, owner) VALUES(?,?,?,?,?,?,?,?,?,?)",
                (order_id, o["symbol"], o["qty"], round(px, 2), o["stop"], o["target1"], o["target2"], o["mode"],
-                time.time()))
+                time.time(), db.owner()))
     s = dict(settings)
-    db.save_settings({"cash": round(float(s["cash"]) - o["qty"] * px, 2)})
-    db.x("INSERT INTO journal(ts, symbol, text) VALUES(?,?,?)",
+    db.save_settings({"cash": round(float(s["cash"]) - o["qty"] * px, 2)}, who=o["owner"])
+    db.x("INSERT INTO journal(ts, symbol, text, owner) VALUES(?,?,?,?)",
          (time.time(), o["symbol"], "Paper BUY %d @ %.2f (stop %.2f, T1 %s). Approval: %r" % (
-             o["qty"], px, o["stop"], o["target1"], reply)))
+             o["qty"], px, o["stop"], o["target1"], reply), db.owner()))
     return {"ok": True, "position_id": pid, "fill_price": round(px, 2),
             "note": "Paper fill at the latest %s quote + slippage. No real order was sent." % q["freshness"]["label"]}
 
 
 def decline(order_id):
-    db.x("UPDATE paper_orders SET status='declined' WHERE id=? AND status IN ('proposed', 'queued')", (order_id,))
+    db.x("UPDATE paper_orders SET status='declined' WHERE id=? AND owner=? AND status IN ('proposed', 'queued')",
+         (order_id, db.owner()))
     return {"ok": True}
 
 
@@ -156,16 +161,16 @@ def _close(p, qty, price, reason, settings):
              "WHERE id=?", (now, price, reason, costs["total"], round(pnl, 2), p["id"]))
     else:
         db.x("INSERT INTO paper_positions(order_id, symbol, qty, entry_price, stop, target1, target2, mode, opened_at,"
-             " closed_at, exit_price, exit_reason, costs, pnl, status) VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,"
-             "'closed')", (p["symbol"], qty, p["entry_price"], p["stop"], p["target1"], p["target2"], p["mode"],
-                           p["opened_at"], now, price, reason, costs["total"], round(pnl, 2)))
+             " closed_at, exit_price, exit_reason, costs, pnl, status, owner) VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+             "'closed',?)", (p["symbol"], qty, p["entry_price"], p["stop"], p["target1"], p["target2"], p["mode"],
+                             p["opened_at"], now, price, reason, costs["total"], round(pnl, 2), p["owner"]))
         db.x("UPDATE paper_positions SET qty=?, stop=?, target1=NULL WHERE id=?",
              (p["qty"] - qty, p["entry_price"], p["id"]))  # rest rides with the stop at break-even
-    cash = float(db.get_settings()["cash"]) + qty * price - costs["total"]
-    db.save_settings({"cash": round(cash, 2)})
-    db.x("INSERT INTO journal(ts, symbol, text) VALUES(?,?,?)",
+    cash = float(db.get_settings(p["owner"])["cash"]) + qty * price - costs["total"]
+    db.save_settings({"cash": round(cash, 2)}, who=p["owner"])
+    db.x("INSERT INTO journal(ts, symbol, text, owner) VALUES(?,?,?,?)",
          (now, p["symbol"], "Paper SELL %d @ %.2f (%s), P&L ₹%.2f after ₹%.2f charges" % (
-             qty, price, reason, pnl, costs["total"])))
+             qty, price, reason, pnl, costs["total"]), p["owner"]))
     return pnl
 
 
@@ -173,7 +178,7 @@ def process_queue(settings, notify=None):
     """Fill queued (approved after hours) paper orders at the open, or expire them."""
     st = cal.market_status()
     now = cal.now_ist()
-    for o in db.q("SELECT * FROM paper_orders WHERE status='queued'"):
+    for o in db.q("SELECT * FROM paper_orders WHERE owner=? AND status='queued'", (db.owner(),)):
         queued_day = cal.to_ist(o["ts"]).date()
         if st["open"]:
             r = _fill(o, o["approval"], settings)
@@ -185,12 +190,19 @@ def process_queue(settings, notify=None):
                  ("not filled during the next session", o["id"]))
 
 
+def active_owners():
+    """Everyone with an open paper position or a queued paper order (the background job checks each)."""
+    rows = db.q("SELECT DISTINCT owner FROM paper_positions WHERE status='open' "
+                "UNION SELECT DISTINCT owner FROM paper_orders WHERE status='queued'")
+    return [r["owner"] for r in rows]
+
+
 def mark_to_market(settings, notify=None):
     """Check every open paper position against the latest quote."""
     process_queue(settings, notify)
     events = []
     now = cal.now_ist()
-    for p in db.q("SELECT * FROM paper_positions WHERE status='open'"):
+    for p in db.q("SELECT * FROM paper_positions WHERE owner=? AND status='open'", (db.owner(),)):
         try:
             q = yahoo.quote_from_chart(yahoo.chart(yahoo.to_yahoo(p["symbol"]), "5d", "5m"))
         except yahoo.DataError:
@@ -223,7 +235,7 @@ def mark_to_market(settings, notify=None):
 
 
 def close_manual(pid, settings):
-    p = db.q("SELECT * FROM paper_positions WHERE id=? AND status='open'", (pid,), one=True)
+    p = db.q("SELECT * FROM paper_positions WHERE id=? AND owner=? AND status='open'", (pid, db.owner()), one=True)
     if not p:
         return {"ok": False, "error": "No open position with that id."}
     try:
@@ -235,8 +247,9 @@ def close_manual(pid, settings):
 
 
 def summary(settings):
-    openpos = db.q("SELECT * FROM paper_positions WHERE status='open' ORDER BY opened_at DESC")
-    closed = db.q("SELECT * FROM paper_positions WHERE status='closed' ORDER BY closed_at")
+    me = db.owner()
+    openpos = db.q("SELECT * FROM paper_positions WHERE owner=? AND status='open' ORDER BY opened_at DESC", (me,))
+    closed = db.q("SELECT * FROM paper_positions WHERE owner=? AND status='closed' ORDER BY closed_at", (me,))
     for p in openpos:
         try:
             q = yahoo.quote_from_chart(yahoo.chart(yahoo.to_yahoo(p["symbol"]), "5d", "5m"))
@@ -253,12 +266,12 @@ def summary(settings):
     return {
         "paper_only": True, "cash": settings["cash"], "capital": settings["capital"],
         "open": openpos, "closed": closed[::-1][:100],
-        "orders": db.q("SELECT * FROM paper_orders ORDER BY ts DESC LIMIT 50"),
+        "orders": db.q("SELECT * FROM paper_orders WHERE owner=? ORDER BY ts DESC LIMIT 50", (me,)),
         "stats": {"trades": len(closed), "wins": len(wins),
                   "win_rate": round(100 * len(wins) / len(closed), 1) if closed else None,
                   "realised_pnl": round(cum, 2),
                   "unrealised_pnl": round(sum(p.get("unrealised") or 0 for p in openpos), 2),
                   "charges": round(sum(c["costs"] or 0 for c in closed), 2)},
         "equity_curve": eq,
-        "journal": db.q("SELECT * FROM journal ORDER BY ts DESC LIMIT 50"),
+        "journal": db.q("SELECT * FROM journal WHERE owner=? ORDER BY ts DESC LIMIT 50", (me,)),
     }

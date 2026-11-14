@@ -32,12 +32,26 @@ def telegram(text):
         return False, "Telegram error: %s" % str(e)[:100]
 
 
+# Owners whose alerts may also go to the Telegram chat in TELEGRAM_CHAT_ID (set by main: the
+# local user "" and the site owner's logins). Friends' alerts stay in the app.
+TELEGRAM_OWNERS = {""}
+
+
+def watchers():
+    """{owner: set of symbols} from everyone's watchlist."""
+    out = {}
+    for r in db.q("SELECT owner, symbol FROM user_watchlist"):
+        out.setdefault(r["owner"], set()).add(r["symbol"])
+    return out
+
+
 def notify(symbol, kind, message, level="info", key_extra=""):
+    """Alert the current owner (db.owner())."""
     day = cal.now_ist().date().isoformat()
     if kind in ("buy_zone", "breakout", "volume_spike") and not cal.market_status()["open"]:
         message += " [market closed: based on the last close]"
     aid = db.add_alert(symbol, kind, message, level, dedupe="%s|%s|%s|%s" % (symbol, kind, day, key_extra))
-    if aid:
+    if aid and db.owner() in TELEGRAM_OWNERS:
         ok, _ = telegram("[%s] %s" % (kind.replace("_", " ").upper(), message))
         if ok:
             db.x("UPDATE alerts SET telegram=1 WHERE id=?", (aid,))
@@ -45,8 +59,13 @@ def notify(symbol, kind, message, level="info", key_extra=""):
 
 
 def evaluate_scan(rows):
-    """Alerts for watchlist symbols from a fresh scan."""
-    watch = {r["symbol"] for r in db.q("SELECT symbol FROM watchlist")}
+    """Alerts for each person's watchlist symbols from a fresh scan."""
+    for who, watch in watchers().items():
+        with db.as_owner(who):
+            _evaluate_scan_for(rows, watch)
+
+
+def _evaluate_scan_for(rows, watch):
     for r in rows:
         if r["symbol"] not in watch:
             continue
@@ -72,26 +91,30 @@ def evaluate_scan(rows):
 
 
 def evaluate_news(items):
-    watch = {r["symbol"] for r in db.q("SELECT symbol FROM watchlist")}
-    held = {r["symbol"] for r in db.q("SELECT symbol FROM paper_positions WHERE status='open'")}
-    for it in items:
-        hit = (watch | held) & set(it["symbols"])
-        if hit and it["impact"] in ("high", "medium") and it.get("age_hours", 99) <= 24:
-            for s in hit:
-                notify(s, "news", "%s: %s (%s, %s)" % (s, it["title"][:160], it["source"], it["published_ist"]),
-                       "bearish" if it["sentiment"] == "negative" else "bullish" if it["sentiment"] == "positive"
-                       else "info", it["id"])
+    interest = watchers()
+    for r in db.q("SELECT owner, symbol FROM paper_positions WHERE status='open'"):
+        interest.setdefault(r["owner"], set()).add(r["symbol"])
+    for who, symbols in interest.items():
+        with db.as_owner(who):
+            for it in items:
+                hit = symbols & set(it["symbols"])
+                if hit and it["impact"] in ("high", "medium") and it.get("age_hours", 99) <= 24:
+                    for s in hit:
+                        notify(s, "news", "%s: %s (%s, %s)" % (s, it["title"][:160], it["source"],
+                                                               it["published_ist"]),
+                               "bearish" if it["sentiment"] == "negative" else "bullish"
+                               if it["sentiment"] == "positive" else "info", it["id"])
 
 
 def recent(limit=100, unseen_only=False):
-    sql = "SELECT * FROM alerts %s ORDER BY ts DESC LIMIT ?" % ("WHERE seen=0" if unseen_only else "")
-    return db.q(sql, (limit,))
+    sql = "SELECT * FROM alerts WHERE owner=? %s ORDER BY ts DESC LIMIT ?" % ("AND seen=0" if unseen_only else "")
+    return db.q(sql, (db.owner(), limit))
 
 
 def mark_seen(ids=None):
     if ids:
         for i in ids:
-            db.x("UPDATE alerts SET seen=1 WHERE id=?", (i,))
+            db.x("UPDATE alerts SET seen=1 WHERE id=? AND owner=?", (i, db.owner()))
     else:
-        db.x("UPDATE alerts SET seen=1")
+        db.x("UPDATE alerts SET seen=1 WHERE owner=?", (db.owner(),))
     return {"ok": True, "ts": time.time()}

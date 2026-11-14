@@ -36,7 +36,6 @@ def _background_loop():
         try:
             now = time.time()
             st = cal.market_status()
-            settings = db.get_settings()
             if now >= next_news:
                 feeds.refresh()
                 alerts.evaluate_news(feeds.latest(hours=24))
@@ -45,7 +44,7 @@ def _background_loop():
             if now >= next_scan:
                 res = services.run_scan(config.BACKGROUND_UNIVERSE, "swing")
                 alerts.evaluate_scan(res.get("rows", []))
-                watch = [r["symbol"] for r in db.q("SELECT symbol FROM watchlist")]
+                watch = sorted({r["symbol"] for r in db.q("SELECT symbol FROM user_watchlist")})  # everyone's
                 if watch:
                     wres = services.run_scan("watchlist", "swing", symbols=watch)
                     alerts.evaluate_scan(wres.get("rows", []))
@@ -57,7 +56,10 @@ def _background_loop():
                 _bg["last_intraday"] = now
                 next_intra = now + 5 * 60
             if st["open"] or st["state"] == "closed":
-                paper.mark_to_market(settings, notify=lambda s, k, m: alerts.notify(s, k, m, "caution"))
+                for who in paper.active_owners():  # each person's own paper account
+                    with db.as_owner(who):
+                        paper.mark_to_market(db.get_settings(),
+                                             notify=lambda s, k, m: alerts.notify(s, k, m, "caution"))
             _bg["cycles"] += 1
         except Exception as e:  # noqa: BLE001 - the loop must survive any single failure
             _log_err("background", e)
@@ -67,6 +69,7 @@ def _background_loop():
 @asynccontextmanager
 async def lifespan(app):
     db.db()
+    alerts.TELEGRAM_OWNERS = {""} | set(auth.USERS) | set(auth.FILE_USERS)  # Telegram: the owner only
     cal.holidays()
     services.load_saved()
     if not config.DISABLE_BACKGROUND:
@@ -104,11 +107,12 @@ async def require_login(request, call_next):
     path = request.url.path
     if auth.LOCKED and path != "/robots.txt":
         return _private(HTMLResponse(_LOCKED_PAGE, status_code=503))
-    if auth.ENABLED and path not in auth.PUBLIC_PATHS:
-        if not auth.current_user(request):
-            if path.startswith("/api/"):
-                return _private(JSONResponse({"error": "Please log in.", "login": True}, status_code=401))
-            return _private(RedirectResponse("/login", status_code=303))
+    user = auth.current_user(request) if auth.ENABLED else ""
+    if auth.ENABLED and path not in auth.PUBLIC_PATHS and not user:
+        if path.startswith("/api/"):
+            return _private(JSONResponse({"error": "Please log in.", "login": True}, status_code=401))
+        return _private(RedirectResponse("/login", status_code=303))
+    db.set_owner(user or "")  # every query in this request works on this person's own data
     return _private(await call_next(request))
 
 
@@ -152,7 +156,13 @@ async def forgot_page(request: Request):
 TOO_MANY = "Too many attempts. Please wait 15 minutes and try again."
 
 
+PENDING = ("Thanks! Your account is waiting for approval by the person who invited you. "
+           "You can sign in as soon as they approve it.")
+
+
 def _signed_in(request, user):
+    if auth.account_status(user) == "pending":  # no session until the owner approves the account
+        return JSONResponse({"ok": True, "pending": True, "message": PENDING})
     resp = JSONResponse({"ok": True, "user": user})
     auth.set_session(resp, request, user)
     return resp
@@ -184,6 +194,9 @@ async def login(request: Request, body: dict = Body(...)):
         auth.record_fail(ip)
         return JSONResponse({"error": "Wrong email/mobile number or password."}, status_code=401)
     auth.clear_fails(ip)
+    if await run(auth.account_status, user) == "pending":
+        return JSONResponse({"error": "Your account is still waiting for approval. You can sign in as soon as the "
+                                      "person who invited you approves it.", "pending": True}, status_code=403)
     return _signed_in(request, user)
 
 
@@ -203,7 +216,7 @@ async def signup_verify(request: Request, body: dict = Body(...)):
 @app.post("/api/auth/signup/phone")
 async def signup_phone(request: Request, body: dict = Body(...)):
     user, err = await _guarded(request, auth.phone_signup, body.get("name"), body.get("phone"),
-                               body.get("password"), body.get("invite"), count_success=True)
+                               body.get("password"), body.get("invite"), None, body.get("email"), count_success=True)
     return err or _signed_in(request, user)
 
 
@@ -244,6 +257,34 @@ def _require_owner(request):
 async def admin_accounts(request: Request):
     _require_owner(request)
     return {"accounts": await run(auth.list_accounts)}
+
+
+@app.post("/api/admin/approve")
+async def admin_approve(request: Request, body: dict = Body(...)):
+    _require_owner(request)
+    if not await run(auth.approve, body.get("id")):
+        raise HTTPException(404, "No such member.")
+    return {"ok": True}
+
+
+@app.get("/api/admin/invites")
+async def admin_invites(request: Request):
+    _require_owner(request)
+    return {"invites": await run(auth.list_invites)}
+
+
+@app.post("/api/admin/invites")
+async def admin_invite_create(request: Request, body: dict = Body(...)):
+    _require_owner(request)
+    return {"ok": True, "code": await run(auth.create_invite, body.get("note"))}
+
+
+@app.post("/api/admin/invites/revoke")
+async def admin_invite_revoke(request: Request, body: dict = Body(...)):
+    _require_owner(request)
+    if not await run(auth.revoke_invite, int(body.get("id") or 0)):
+        raise HTTPException(404, "That code was already used or doesn't exist.")
+    return {"ok": True}
 
 
 @app.post("/api/admin/reset")
@@ -331,7 +372,7 @@ async def scan(universe_key: str = Query("nifty100", alias="universe"), mode: st
     tag = (universe_key, mode)
     res = services.SCANS.get(tag)
     if universe_key == "watchlist":
-        syms = [r["symbol"] for r in db.q("SELECT symbol FROM watchlist")]
+        syms = _my_watchlist()
         if not syms:
             return {"universe": "watchlist", "mode": mode, "rows": [], "message": "Your watchlist is empty."}
         if refresh or not res:
@@ -393,7 +434,7 @@ async def fund(symbol: str):
 @app.get("/api/longterm")
 async def longterm():
     """Fundamentals for the watchlist (long-term investing view)."""
-    syms = [r["symbol"] for r in db.q("SELECT symbol FROM watchlist")]
+    syms = _my_watchlist()
     out = []
     for s in syms:
         try:
@@ -416,9 +457,14 @@ async def news(symbol: str = None, kind: str = None, hours: int = 72):
 
 # ---------------------------------------------------------------- watchlist & alerts
 
+def _my_watchlist():
+    return [r["symbol"] for r in db.q("SELECT symbol FROM user_watchlist WHERE owner=? ORDER BY added_at DESC",
+                                      (db.owner(),))]
+
+
 @app.get("/api/watchlist")
 async def watchlist():
-    rows = db.q("SELECT * FROM watchlist ORDER BY added_at DESC")
+    rows = db.q("SELECT * FROM user_watchlist WHERE owner=? ORDER BY added_at DESC", (db.owner(),))
     scan = {r["symbol"]: r for r in (services.SCANS.get(("watchlist", "swing")) or {}).get("rows", [])}
     for r in rows:
         r["analysis"] = scan.get(r["symbol"])
@@ -434,17 +480,18 @@ async def watch_add(body: dict = Body(...)):
         await run(yahoo.chart, yahoo.to_yahoo(sym), "5d", "1d")
     except yahoo.DataError:
         raise HTTPException(404, "No market data for %s on NSE" % sym)
-    db.x("INSERT INTO watchlist(symbol, added_at, note, mode) VALUES(?,?,?,?) "
-         "ON CONFLICT(symbol) DO UPDATE SET added_at=excluded.added_at, note=excluded.note, mode=excluded.mode",
+    db.x("INSERT INTO user_watchlist(owner, symbol, added_at, note, mode) VALUES(?,?,?,?,?) "
+         "ON CONFLICT(owner, symbol) DO UPDATE SET added_at=excluded.added_at, note=excluded.note, mode=excluded.mode",
+         (db.owner(),) +
          (sym, time.time(), body.get("note", ""), body.get("mode", "swing")))
-    syms = [r["symbol"] for r in db.q("SELECT symbol FROM watchlist")]
+    syms = sorted({r["symbol"] for r in db.q("SELECT symbol FROM user_watchlist")})  # keep everyone's scan fresh
     threading.Thread(target=services.run_scan, args=("watchlist", "swing", syms), daemon=True).start()
     return {"ok": True}
 
 
 @app.delete("/api/watchlist/{symbol}")
 async def watch_del(symbol: str):
-    db.x("DELETE FROM watchlist WHERE symbol=?", (symbol.upper(),))
+    db.x("DELETE FROM user_watchlist WHERE owner=? AND symbol=?", (db.owner(), symbol.upper()))
     return {"ok": True}
 
 
@@ -545,7 +592,8 @@ async def paper_summary():
 async def journal(body: dict = Body(...)):
     if not body.get("text"):
         raise HTTPException(400, "text required")
-    db.x("INSERT INTO journal(ts, symbol, text) VALUES(?,?,?)", (time.time(), body.get("symbol"), body["text"][:2000]))
+    db.x("INSERT INTO journal(ts, symbol, text, owner) VALUES(?,?,?,?)",
+         (time.time(), body.get("symbol"), body["text"][:2000], db.owner()))
     return {"ok": True}
 
 

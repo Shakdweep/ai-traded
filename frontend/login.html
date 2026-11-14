@@ -157,6 +157,9 @@
         <label for="su-phone">Mobile number</label>
         <input id="su-phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="98765 43210">
         <p class="hint">10-digit Indian number (or + country code). You'll use it to sign in.</p>
+        <label for="su-contact">Email <span style="font-weight:500">(optional)</span></label>
+        <input id="su-contact" type="email" autocomplete="email" autocapitalize="none" spellcheck="false" inputmode="email">
+        <p class="hint">Add one so you can reset your own password by email later.</p>
       </div>
       <div id="su-email-row" hidden>
         <label for="su-email">Email</label>
@@ -168,7 +171,7 @@
       <p class="hint">At least 8 characters.</p>
       <label for="su-invite">Invite code</label>
       <input id="su-invite" autocomplete="off" autocapitalize="none" spellcheck="false">
-      <p class="hint">You'll get this from the person who invited you.</p>
+      <p class="hint">Your personal code from the person who invited you. It works once.</p>
       <p class="err" role="alert"></p>
       <button class="go" type="submit"><span class="spin"></span><span id="su-go">Create account</span></button>
       <p class="switch">Already have an account? <a href="/login" data-go="signin">Sign in</a></p>
@@ -188,12 +191,21 @@
       </div>
     </form>
 
+    <!-- 3b. waiting for approval -->
+    <form data-view="pending" novalidate hidden>
+      <h1>You're on the list 🎉</h1>
+      <p class="sub" id="pd-text">Thanks! Your account is waiting for approval by the person who invited you.</p>
+      <div class="notice">As soon as they approve it, sign in with your <b>mobile number</b> (or email) and the
+        password you just chose. You can let them know you've signed up.</div>
+      <p class="switch"><a href="/login" data-go="signin">Go to sign in</a></p>
+    </form>
+
     <!-- 4. forgot password -->
     <form data-view="forgot" novalidate hidden>
       <h1>Forgot your password?</h1>
       <p class="sub" id="fp-sub">Enter your email and we'll send you a code to set a new one.</p>
-      <div class="notice" id="fp-phone-note">Signed up with a <b>mobile number</b>? Ask the person who invited you.
-        They can give you a new temporary password in a minute.</div>
+      <div class="notice" id="fp-phone-note">Signed up with a <b>mobile number</b>? Enter the email you added, or ask
+        the person who invited you. They can give you a new temporary password in a minute.</div>
       <label for="fp-email">Email</label>
       <input id="fp-email" type="email" autocomplete="email" autocapitalize="none" spellcheck="false" inputmode="email">
       <p class="err" role="alert"></p>
@@ -229,7 +241,7 @@
     document.querySelectorAll("form[data-view]").forEach((f) => (views[f.dataset.view] = f));
     const PATHS = { signin: "/login", signup: "/signup", forgot: "/forgot" };
     const TITLES = { signin: "Sign in", signup: "Create account", "signup-code": "Confirm email",
-                     forgot: "Forgot password", reset: "New password" };
+                     forgot: "Forgot password", reset: "New password", pending: "Waiting for approval" };
     const state = { email: "", signup: null, cfg: { signup_enabled: true, email_enabled: true } };
     let timer = null;
 
@@ -310,6 +322,10 @@
     const need = (cond, msg, el) => { if (!cond) { if (el) el.focus(); throw new Error(msg); } };
     const validEmail = (v) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(v);
     const home = () => location.replace("/");
+    const done = (d) => {
+      if (d && d.pending) { $("#pd-text").textContent = d.message || $("#pd-text").textContent; show("pending", false); }
+      else home();
+    };
 
     function cooldown(form) {
       const b = form.querySelector(".resend");
@@ -344,8 +360,9 @@
         need(phone.replace(/\D/g, "").length >= 10, "Please enter your 10-digit mobile number.", $("#su-phone"));
         need(password.length >= 8, "Password must be at least 8 characters.", $("#su-pw"));
         need(invite, "Enter your invite code.", $("#su-invite"));
-        await post("/api/auth/signup/phone", { name, phone, password, invite });
-        return home();
+        const contact = $("#su-contact").value.trim();
+        if (contact) need(validEmail(contact), "That email doesn't look right. Fix it, or leave it empty.", $("#su-contact"));
+        return done(await post("/api/auth/signup/phone", { name, phone, password, invite, email: contact }));
       }
       need(validEmail(email), "Please enter a valid email address.", $("#su-email"));
       need(password.length >= 8, "Password must be at least 8 characters.", $("#su-pw"));
@@ -359,8 +376,7 @@
     views["signup-code"].addEventListener("submit", (e) => { e.preventDefault(); step(views["signup-code"], async () => {
       const code = $("#sc-code").value;
       need(code.length === 6, "Enter the 6-digit code from the email.", $("#sc-code"));
-      await post("/api/auth/signup/verify", { email: state.email, code });
-      home();
+      done(await post("/api/auth/signup/verify", { email: state.email, code }));
     }); });
 
     // 4. forgot -> email a code
@@ -380,8 +396,7 @@
       const code = $("#rp-code").value, password = $("#rp-pw").value;
       need(code.length === 6, "Enter the 6-digit code from the email.", $("#rp-code"));
       need(password.length >= 8, "Password must be at least 8 characters.", $("#rp-pw"));
-      await post("/api/auth/forgot/verify", { email: state.email, code, password });
-      home();
+      done(await post("/api/auth/forgot/verify", { email: state.email, code, password }));
     }); });
 
     // resend buttons

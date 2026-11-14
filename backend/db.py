@@ -9,12 +9,14 @@ All SQL is written once with "?" placeholders; for Postgres it is translated to 
 and the schema types are mapped (REAL -> DOUBLE PRECISION, AUTOINCREMENT -> BIGSERIAL).
 """
 
+import contextvars
 import json
 import os
 import re
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 
 from .config import DB_PATH
 
@@ -23,7 +25,28 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USING_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
 # tables whose INSERTs return the new row id
-_ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal", "email_codes"}
+_ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal", "email_codes", "invites"}
+
+# Whose data a request (or a background step) works on: the signed-in account id, or ""
+# on your own PC where there is no login. Set once per request by the login middleware.
+_owner = contextvars.ContextVar("owner", default="")
+
+
+def owner():
+    return _owner.get()
+
+
+def set_owner(value):
+    return _owner.set(value or "")
+
+
+@contextmanager
+def as_owner(value):
+    token = _owner.set(value or "")
+    try:
+        yield
+    finally:
+        _owner.reset(token)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -60,6 +83,36 @@ CREATE TABLE IF NOT EXISTS email_codes (
   payload TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL, attempts INTEGER DEFAULT 0,
   used INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS email_codes_lookup ON email_codes(email, purpose, created_at);
+CREATE TABLE IF NOT EXISTS user_settings (
+  owner TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (owner, key));
+CREATE TABLE IF NOT EXISTS user_watchlist (
+  owner TEXT NOT NULL, symbol TEXT NOT NULL, added_at REAL NOT NULL, note TEXT DEFAULT '', mode TEXT DEFAULT 'swing',
+  PRIMARY KEY (owner, symbol));
+CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, code_hash TEXT NOT NULL UNIQUE, hint TEXT, note TEXT,
+  created_at REAL NOT NULL, used_by TEXT, used_at REAL, revoked INTEGER DEFAULT 0);
+"""
+
+# Columns added after the first version. Each is added once if missing (safe on every start).
+MIGRATIONS = [
+    ("alerts", "owner", "TEXT NOT NULL DEFAULT ''"),
+    ("paper_orders", "owner", "TEXT NOT NULL DEFAULT ''"),
+    ("paper_positions", "owner", "TEXT NOT NULL DEFAULT ''"),
+    ("journal", "owner", "TEXT NOT NULL DEFAULT ''"),
+    ("accounts", "status", "TEXT NOT NULL DEFAULT 'active'"),
+    ("accounts", "contact_email", "TEXT"),
+    ("accounts", "invite_id", "INTEGER"),
+    ("accounts", "approved_at", "REAL"),
+]
+POST_MIGRATION = """
+CREATE INDEX IF NOT EXISTS alerts_owner ON alerts(owner, ts);
+CREATE INDEX IF NOT EXISTS paper_orders_owner ON paper_orders(owner, status);
+CREATE INDEX IF NOT EXISTS paper_positions_owner ON paper_positions(owner, status);
+CREATE INDEX IF NOT EXISTS journal_owner ON journal(owner, ts);
+CREATE INDEX IF NOT EXISTS accounts_contact ON accounts(contact_email);
+INSERT INTO user_settings(owner, key, value) SELECT '', key, value FROM settings WHERE true ON CONFLICT DO NOTHING;
+INSERT INTO user_watchlist(owner, symbol, added_at, note, mode) SELECT '', symbol, added_at, note, mode FROM watchlist
+  WHERE true ON CONFLICT DO NOTHING;
 """
 
 DEFAULT_SETTINGS = {
@@ -135,8 +188,25 @@ def db():
             else:
                 c.executescript(SCHEMA)
                 c.commit()
+            _migrate(c)
             _conn = c
         return _conn
+
+
+def _migrate(c):
+    """Add the newer columns to older databases, then copy single-user data (settings and
+    watchlist from before accounts existed) to the local owner "" once."""
+    for table, col, decl in MIGRATIONS:
+        if USING_POSTGRES:
+            c.execute("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s" % (table, col, pg_schema(decl)))
+        elif col not in {r[1] for r in c.execute("PRAGMA table_info(%s)" % table).fetchall()}:
+            c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, decl))
+    if USING_POSTGRES:
+        for stmt in filter(str.strip, POST_MIGRATION.split(";")):
+            c.execute(stmt)
+    else:
+        c.executescript(POST_MIGRATION)
+        c.commit()
 
 
 def _run(fn):
@@ -195,9 +265,10 @@ def backend_name():
     return "postgres" if USING_POSTGRES else "sqlite"
 
 
-def get_settings():
+def get_settings(who=None):
+    who = owner() if who is None else who
     s = dict(DEFAULT_SETTINGS)
-    for r in q("SELECT key, value FROM settings"):
+    for r in q("SELECT key, value FROM user_settings WHERE owner=?", (who,)):
         try:
             s[r["key"]] = json.loads(r["value"])
         except ValueError:
@@ -207,19 +278,21 @@ def get_settings():
     return s
 
 
-def save_settings(updates):
+def save_settings(updates, who=None):
+    who = owner() if who is None else who
     allowed = set(DEFAULT_SETTINGS) - {"paper"}
     for k, v in updates.items():
         if k in allowed:
-            x("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-              (k, json.dumps(v)))
-    return get_settings()
+            x("INSERT INTO user_settings(owner, key, value) VALUES(?, ?, ?) "
+              "ON CONFLICT(owner, key) DO UPDATE SET value=excluded.value", (who, k, json.dumps(v)))
+    return get_settings(who)
 
 
-def add_alert(symbol, kind, message, level="info", dedupe=None):
-    """Insert once per dedupe key ("rings once"). Returns the id or None if it already rang."""
+def add_alert(symbol, kind, message, level="info", dedupe=None, who=None):
+    """Insert once per dedupe key ("rings once") for one owner. Returns the id or None if it already rang."""
+    who = owner() if who is None else who
     try:
-        return x("INSERT INTO alerts(ts, symbol, kind, message, level, dedupe) VALUES(?,?,?,?,?,?)",
-                 (time.time(), symbol, kind, message, level, dedupe))
+        return x("INSERT INTO alerts(ts, symbol, kind, message, level, dedupe, owner) VALUES(?,?,?,?,?,?,?)",
+                 (time.time(), symbol, kind, message, level, "%s|%s" % (who, dedupe) if dedupe else None, who))
     except IntegrityError:
         return None

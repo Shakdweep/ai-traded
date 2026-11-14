@@ -1,9 +1,12 @@
 """Invite-only accounts (private beta).
 
+How people join: the owner creates a single-use invite code for each friend (Members
+page). Every new account waits as "pending" until the owner approves it.
+
 How people sign in:
   * Mobile-number accounts (for now, until email is set up): name + mobile number +
-    password + invite code, no OTP. Forgotten passwords are reset by the owner on the
-    Members page.
+    password + invite code (+ optional email), no OTP. Forgotten passwords are reset by
+    the owner on the Members page, or by email code if they added an email.
   * Email accounts. Sign-up: name + email + password + invite code, then a
     6-digit code is emailed to prove the address. "Forgot password" emails a code too.
     Passwords are stored only as salted PBKDF2 hashes; codes only as keyed hashes.
@@ -74,11 +77,12 @@ ON_HOST = bool(os.environ.get("RENDER"))  # Render sets RENDER=true on every ser
 USERS = _parse_users(os.environ.get("TRADER_USERS", ""))
 INVITE_CODE = os.environ.get("TRADER_INVITE_CODE", "").strip()
 FILE_USERS, INVITE_HASH = _load_access_file(Path(__file__).with_name("access.json")) if ON_HOST else ({}, "")
-INVITE_REQUIRED = bool(INVITE_CODE or INVITE_HASH)
+SHARED_INVITE = bool(INVITE_CODE or INVITE_HASH)  # optional shared code, besides single-use codes
+ENABLED = bool(USERS or FILE_USERS) or SHARED_INVITE
+INVITE_REQUIRED = ENABLED                  # sign-ups are open (with an invite) whenever login is on
 EMAIL_ENABLED = mailer.configured()        # codes can be delivered (or printed, on your own PC)
 SIGNUP_ENABLED = INVITE_REQUIRED and EMAIL_ENABLED  # email sign-up (with a code)
 PHONE_SIGNUP_ENABLED = INVITE_REQUIRED             # mobile sign-up (no code)
-ENABLED = bool(USERS or FILE_USERS) or INVITE_REQUIRED
 LOCKED = ON_HOST and not ENABLED          # hosted but no accounts or invite code configured
 SECRET = (os.environ.get("TRADER_SECRET_KEY") or secrets.token_hex(32)).encode()
 
@@ -167,11 +171,70 @@ def display_name(user):
     return user
 
 
+def _invite_hash(code):
+    return hashlib.sha256((code or "").strip().lower().encode()).hexdigest()
+
+
+def find_invite(code):
+    """'shared' for the optional shared code, an invite id for an unused single-use code, else None."""
+    code = (code or "").strip()
+    if not code:
+        return None
+    if INVITE_CODE and hmac.compare_digest(code.encode(), INVITE_CODE.encode()):
+        return "shared"
+    if INVITE_HASH and _matches_hash(code, INVITE_HASH):
+        return "shared"
+    row = db.q("SELECT id FROM invites WHERE code_hash=? AND used_by IS NULL AND revoked=0",
+               (_invite_hash(code),), one=True)
+    return row["id"] if row else None
+
+
 def _invite_ok(invite):
-    invite = (invite or "").strip()
-    if INVITE_CODE:
-        return hmac.compare_digest(invite.encode(), INVITE_CODE.encode())
-    return bool(INVITE_HASH) and _matches_hash(invite, INVITE_HASH)
+    return find_invite(invite) is not None
+
+
+def _invite_still_free(inv):
+    if inv == "shared":
+        return True
+    return db.q("SELECT id FROM invites WHERE id=? AND used_by IS NULL AND revoked=0", (inv,), one=True) is not None
+
+
+def _consume_invite(inv, account_id, now):
+    """Mark a single-use code as used by this account. False if someone else used it first."""
+    if inv == "shared":
+        return True
+    db.x("UPDATE invites SET used_by=?, used_at=? WHERE id=? AND used_by IS NULL AND revoked=0", (account_id, now, inv))
+    row = db.q("SELECT used_by FROM invites WHERE id=?", (inv,), one=True)
+    return bool(row) and row["used_by"] == account_id
+
+
+BAD_INVITE = "That invite code isn't right, or it has already been used. Ask the person who invited you."
+
+
+def _create_pending(login, name, pw_hash, salt_hex, inv, contact_email, now):
+    """Insert a pending account and use up its invite. Returns an error message or None."""
+    try:
+        db.x("INSERT INTO accounts(email, name, pw_hash, salt, created_at, pw_changed_at, status, contact_email, "
+             "invite_id) VALUES(?,?,?,?,?,?,?,?,?)",
+             (login, name, pw_hash, salt_hex, now, 0, "pending", contact_email,
+              None if inv == "shared" else inv))
+    except db.IntegrityError:
+        return "An account with this %s already exists. Sign in instead." % ("email" if "@" in login else
+                                                                             "mobile number")
+    if not _consume_invite(inv, login, now):
+        db.x("DELETE FROM accounts WHERE email=?", (login,))
+        return BAD_INVITE
+    return None
+
+
+def account_status(user):
+    """'active' for owners and approved accounts, 'pending' while waiting for approval, None if unknown."""
+    if not user:
+        return None
+    if not is_account_id(user):
+        return "active" if user_exists(user) else None
+    acct = get_account(user)
+    return (acct.get("status") or "active") if acct else None
 
 
 def clean_email(email):
@@ -186,7 +249,8 @@ def check_password(user, password):
     if is_account_id(user):
         acct = get_account(user)
         if acct and hmac.compare_digest(_hash(password, bytes.fromhex(acct["salt"])), acct["pw_hash"]):
-            db.x("UPDATE accounts SET last_login=? WHERE email=?", (time.time(), user))
+            if (acct.get("status") or "active") == "active":
+                db.x("UPDATE accounts SET last_login=? WHERE email=?", (time.time(), user))
             return user
         if not acct:
             _hash(password, b"0" * 16)  # same work for unknown emails so timing does not reveal them
@@ -256,8 +320,9 @@ def signup_start(name, email, password, invite, now=None):
         return None, "Creating accounts is turned off. Ask the owner for a login."
     if not EMAIL_ENABLED:
         return None, "Email isn't set up on this site yet, so new accounts can't be created. Ask the owner."
-    if not _invite_ok(invite):
-        return None, "That invite code isn't right."
+    inv = find_invite(invite)
+    if inv is None:
+        return None, BAD_INVITE
     name = " ".join((name or "").split())[:40]
     if not name:
         return None, "Please enter your name."
@@ -274,7 +339,8 @@ def signup_start(name, email, password, invite, now=None):
         return None, wait
     salt = secrets.token_bytes(16)
     try:
-        _issue_code(email, "signup", name, {"name": name, "pw_hash": _hash(password, salt), "salt": salt.hex()}, now)
+        _issue_code(email, "signup", name, {"name": name, "pw_hash": _hash(password, salt), "salt": salt.hex(),
+                                            "invite": inv}, now)
     except mailer.MailError as e:
         return None, str(e)
     return mask(email), None
@@ -291,11 +357,12 @@ def signup_verify(email, code, now=None):
     if get_account(email):
         return email, None  # already created (e.g. double click)
     p = json.loads(row["payload"])
-    try:
-        db.x("INSERT INTO accounts(email, name, pw_hash, salt, created_at, pw_changed_at) VALUES(?,?,?,?,?,?)",
-             (email, p["name"], p["pw_hash"], p["salt"], now or time.time(), 0))
-    except db.IntegrityError:
-        pass  # created by a parallel request
+    inv = p.get("invite", "shared")
+    if not _invite_still_free(inv):
+        return None, BAD_INVITE
+    err = _create_pending(email, p["name"], p["pw_hash"], p["salt"], inv, None, now or time.time())
+    if err and not get_account(email):
+        return None, err
     return email, None
 
 
@@ -306,7 +373,7 @@ def forgot_start(email, now=None):
     email = clean_email(email)
     if not email:
         return None, "Please enter a valid email address."
-    acct = get_account(email)
+    acct = _account_for_reset(email)
     if acct:
         now = now or time.time()
         wait = _can_send(email, "reset", now)
@@ -325,23 +392,32 @@ def forgot_verify(email, code, new_password, now=None):
         return None, "Please enter a valid email address."
     if len(new_password or "") < MIN_PASSWORD:
         return None, "Password must be at least %d characters." % MIN_PASSWORD
-    if not get_account(email):
+    acct = _account_for_reset(email)
+    if not acct:
         return None, "That code has expired. Ask for a new one."
     _, err = _check_code(email, "reset", code, now)
     if err:
         return None, err
     salt = secrets.token_bytes(16)
     db.x("UPDATE accounts SET pw_hash=?, salt=?, pw_changed_at=? WHERE email=?",
-         (_hash(new_password, salt), salt.hex(), (now or time.time()) * 1000, email))  # ms
-    return email, None
+         (_hash(new_password, salt), salt.hex(), (now or time.time()) * 1000, acct["email"]))  # ms
+    return acct["email"], None
 
 
-def phone_signup(name, phone, password, invite, now=None):
-    """Create a mobile-number account right away (no OTP). Returns (id, None) or (None, error)."""
+def _account_for_reset(email):
+    """The account that signs in with this email, or a mobile account that added it as its email."""
+    return get_account(email) or db.q("SELECT * FROM accounts WHERE contact_email=? ORDER BY created_at LIMIT 1",
+                                      (email,), one=True)
+
+
+def phone_signup(name, phone, password, invite, now=None, contact_email=None):
+    """Create a mobile-number account (no OTP); it waits for the owner's approval.
+    Returns (id, None) or (None, error)."""
     if not INVITE_REQUIRED:
         return None, "Creating accounts is turned off. Ask the owner for a login."
-    if not _invite_ok(invite):
-        return None, "That invite code isn't right."
+    inv = find_invite(invite)
+    if inv is None:
+        return None, BAD_INVITE
     name = " ".join((name or "").split())[:40]
     if not name:
         return None, "Please enter your name."
@@ -350,21 +426,56 @@ def phone_signup(name, phone, password, invite, now=None):
         return None, "Please enter a valid mobile number (10 digits, or with a + country code)."
     if len(password or "") < MIN_PASSWORD:
         return None, "Password must be at least %d characters." % MIN_PASSWORD
+    contact = None
+    if (contact_email or "").strip():
+        contact = clean_email(contact_email)
+        if not contact:
+            return None, "That email address doesn't look right. Fix it, or leave it empty."
     if get_account(phone):
         return None, "An account with this mobile number already exists. Sign in instead."
     salt = secrets.token_bytes(16)
-    try:
-        db.x("INSERT INTO accounts(email, name, pw_hash, salt, created_at, pw_changed_at) VALUES(?,?,?,?,?,?)",
-             (phone, name, _hash(password, salt), salt.hex(), now or time.time(), 0))
-    except db.IntegrityError:
-        return None, "An account with this mobile number already exists. Sign in instead."
-    return phone, None
+    err = _create_pending(phone, name, _hash(password, salt), salt.hex(), inv, contact, now or time.time())
+    return (None, err) if err else (phone, None)
 
 
 # ---------------------------------------------------------------- owner tools (Members page)
 
 def list_accounts():
-    return db.q("SELECT email AS id, name, created_at, last_login FROM accounts ORDER BY created_at DESC")
+    return db.q("SELECT a.email AS id, a.name, a.status, a.contact_email, a.created_at, a.last_login, "
+                "a.approved_at, i.note AS invite_note FROM accounts a LEFT JOIN invites i ON i.id = a.invite_id "
+                "ORDER BY CASE WHEN a.status='pending' THEN 0 ELSE 1 END, a.created_at DESC")
+
+
+def approve(account_id, now=None):
+    acct = get_account(account_id)
+    if not acct:
+        return False
+    db.x("UPDATE accounts SET status='active', approved_at=? WHERE email=?", (now or time.time(), acct["email"]))
+    return True
+
+
+INVITE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"  # no look-alikes (0/o, 1/l/i)
+
+
+def create_invite(note, now=None):
+    """A new single-use invite code. Only its hash is stored, so it is shown once."""
+    grp = lambda: "".join(secrets.choice(INVITE_ALPHABET) for _ in range(4))  # noqa: E731
+    code = "ait-%s-%s" % (grp(), grp())
+    db.x("INSERT INTO invites(code_hash, hint, note, created_at) VALUES(?,?,?,?)",
+         (_invite_hash(code), code[-4:], " ".join((note or "").split())[:60] or None, now or time.time()))
+    return code
+
+
+def list_invites():
+    return db.q("SELECT id, hint, note, created_at, used_by, used_at, revoked FROM invites ORDER BY created_at DESC")
+
+
+def revoke_invite(invite_id):
+    row = db.q("SELECT id FROM invites WHERE id=? AND used_by IS NULL", (invite_id,), one=True)
+    if not row:
+        return False
+    db.x("UPDATE invites SET revoked=1 WHERE id=?", (invite_id,))
+    return True
 
 
 def owner_reset_password(account_id, now=None):
@@ -419,7 +530,10 @@ def read_token(token, now=None):
         if exp_ms < (now or time.time()) * 1000 or not user_exists(user):
             return None  # expired, or the account no longer exists
         if is_account_id(user):
-            if exp_ms - SESSION_MS < (get_account(user)["pw_changed_at"] or 0):
+            acct = get_account(user)
+            if (acct.get("status") or "active") != "active":
+                return None  # waiting for the owner's approval
+            if exp_ms - SESSION_MS < (acct["pw_changed_at"] or 0):
                 return None  # password changed since this session started
         return user
     except Exception:  # noqa: BLE001 - any malformed cookie is simply "not logged in"
