@@ -156,6 +156,7 @@ api("/auth/me").then((d) => {
   $("#user-name").title = d.user;
   $("#user-av").textContent = name.slice(0, 1).toUpperCase();
   $("#user-box").hidden = false;
+  if (d.owner) $("#tab-members").hidden = false;
 }).catch(() => { });
 $("#logout-btn").addEventListener("click", async () => {
   try { await api("/auth/logout", { method: "POST" }); } catch { }
@@ -700,6 +701,43 @@ async function viewStatus() {
     <div class="card"><h3>Recent errors</h3>${Object.entries(pr.prices.recent_errors).map(([k, v]) => `<div class="small"><b>${esc(k)}</b> ${esc(v.error)} <span class="dim">${ago(v.ts)}</span></div>`).join("") + s.background.errors.map((e) => `<div class="small"><b>${esc(e.where)}</b> ${esc(e.error)} <span class="dim">${ago(e.ts)}</span></div>`).join("") || '<div class="dim small">None.</div>'}</div></div>`;
 }
 
+// ------------------------------------------------------------------ members (owner only)
+async function viewMembers() {
+  const d = await api("/admin/accounts");
+  const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "–";
+  const rows = d.accounts.map((a) => `<tr>
+      <td><b>${esc(a.name)}</b></td><td class="mono">${esc(a.id)}</td>
+      <td>${when(a.created_at)}</td><td>${when(a.last_login)}</td>
+      <td class="n"><button class="btn sm" data-reset="${esc(a.id)}">Reset password</button>
+        <button class="btn sm bad" data-remove="${esc(a.id)}">Remove</button></td></tr>`).join("");
+  app.innerHTML = `<div class="grid">
+    <div class="card"><h3>Members <span class="sub">${d.accounts.length} account${d.accounts.length === 1 ? "" : "s"}</span></h3>
+      <p class="muted" style="margin-top:0">People who created an account with the invite code. If someone forgets their password,
+        click <b>Reset password</b> and send them the temporary password privately. They can sign in with it straight away.</p>
+      <div id="m-result"></div>
+      ${d.accounts.length ? `<div class="tablewrap"><table class="plain"><thead><tr><th>Name</th><th>Email / mobile</th>
+        <th>Joined</th><th>Last sign-in</th><th class="n">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : '<div class="empty">No members yet. Share the site link and invite code with your friends.</div>'}
+    </div></div>`;
+  app.querySelectorAll("[data-reset]").forEach((b) => b.onclick = async () => {
+    const id = b.dataset.reset;
+    if (!confirm("Give " + id + " a new temporary password? Their current password stops working.")) return;
+    try {
+      const r = await api("/admin/reset", { method: "POST", body: { id } });
+      $("#m-result").innerHTML = `<div class="card hero" style="margin-bottom:18px">
+        <b>New temporary password for ${esc(id)}:</b>
+        <div class="mono" style="font-size:22px;margin:10px 0;user-select:all">${esc(r.temp_password)}</div>
+        <div class="muted small">Send it to them privately. It is shown only once.</div></div>`;
+    } catch (e) { $("#m-result").innerHTML = errorBox(e); }
+  });
+  app.querySelectorAll("[data-remove]").forEach((b) => b.onclick = async () => {
+    const id = b.dataset.remove;
+    if (!confirm("Remove the account " + id + "? They will be signed out and can't sign in again.")) return;
+    try { await api("/admin/remove", { method: "POST", body: { id } }); route(); }
+    catch (e) { $("#m-result").innerHTML = errorBox(e); }
+  });
+}
+
 // ------------------------------------------------------------------ router
 async function route() {
   clearView();
@@ -720,6 +758,7 @@ async function route() {
       case "paper": return await viewPaper();
       case "settings": return await viewSettings();
       case "status": return await viewStatus();
+      case "members": return await viewMembers();
       case "stock": return await viewStock(decodeURIComponent(parts[1] || ""));
       default: return await viewToday();
     }

@@ -74,6 +74,14 @@
     .eye:hover { color: var(--text); }
     .field input { padding-right: 64px; }
     .hint { margin: 7px 0 0; font-size: 12px; color: var(--dim); }
+    .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 4px;
+      border: 1px solid var(--line2); border-radius: 12px; }
+    .seg button { border: 0; background: none; color: var(--muted); font: 600 14px "Inter", sans-serif; padding: 9px;
+      border-radius: 8px; cursor: pointer; }
+    .seg button.on { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--text); }
+    .notice { margin: 4px 0 6px; padding: 12px 14px; border-radius: 10px; font-size: 13px; color: var(--muted);
+      border: 1px solid var(--line2); background: color-mix(in srgb, var(--info) 7%, transparent); }
+    .notice b { color: var(--text); }
 
     .err { min-height: 20px; margin: 14px 0 0; font-size: 13px; color: var(--bear); }
     .ok { color: var(--bull); }
@@ -125,9 +133,9 @@
     <!-- 1. sign in -->
     <form data-view="signin" novalidate hidden>
       <h1>Welcome back</h1>
-      <p class="sub">Sign in with your email and password.</p>
-      <label for="si-email">Email</label>
-      <input id="si-email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" inputmode="email">
+      <p class="sub">Sign in with your mobile number or email.</p>
+      <label for="si-email">Mobile number or email</label>
+      <input id="si-email" autocomplete="username" autocapitalize="none" spellcheck="false">
       <div class="label-row"><label for="si-pw">Password</label><a href="/forgot" data-go="forgot">Forgot password?</a></div>
       <div class="field"><input id="si-pw" type="password" autocomplete="current-password"><button type="button" class="eye">Show</button></div>
       <p class="err" role="alert"></p>
@@ -138,11 +146,23 @@
     <!-- 2. create account -->
     <form data-view="signup" novalidate hidden>
       <h1>Create your account</h1>
-      <p class="sub">We'll email you a 6-digit code to confirm it's you.</p>
+      <p class="sub" id="su-sub">Takes less than a minute.</p>
+      <div class="seg" id="su-seg" role="tablist" hidden>
+        <button type="button" data-mode="phone" class="on">Mobile number</button>
+        <button type="button" data-mode="email">Email</button>
+      </div>
       <label for="su-name">Your name</label>
       <input id="su-name" autocomplete="name" maxlength="40">
-      <label for="su-email">Email</label>
-      <input id="su-email" type="email" autocomplete="email" autocapitalize="none" spellcheck="false" inputmode="email">
+      <div id="su-phone-row">
+        <label for="su-phone">Mobile number</label>
+        <input id="su-phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="98765 43210">
+        <p class="hint">10-digit Indian number (or + country code). You'll use it to sign in.</p>
+      </div>
+      <div id="su-email-row" hidden>
+        <label for="su-email">Email</label>
+        <input id="su-email" type="email" autocomplete="email" autocapitalize="none" spellcheck="false" inputmode="email">
+        <p class="hint">We'll email you a 6-digit code to confirm it's you.</p>
+      </div>
       <label for="su-pw">Password</label>
       <div class="field"><input id="su-pw" type="password" autocomplete="new-password"><button type="button" class="eye">Show</button></div>
       <p class="hint">At least 8 characters.</p>
@@ -150,7 +170,7 @@
       <input id="su-invite" autocomplete="off" autocapitalize="none" spellcheck="false">
       <p class="hint">You'll get this from the person who invited you.</p>
       <p class="err" role="alert"></p>
-      <button class="go" type="submit"><span class="spin"></span><span>Send code</span></button>
+      <button class="go" type="submit"><span class="spin"></span><span id="su-go">Create account</span></button>
       <p class="switch">Already have an account? <a href="/login" data-go="signin">Sign in</a></p>
     </form>
 
@@ -171,7 +191,9 @@
     <!-- 4. forgot password -->
     <form data-view="forgot" novalidate hidden>
       <h1>Forgot your password?</h1>
-      <p class="sub">Enter your email and we'll send you a code to set a new one.</p>
+      <p class="sub" id="fp-sub">Enter your email and we'll send you a code to set a new one.</p>
+      <div class="notice" id="fp-phone-note">Signed up with a <b>mobile number</b>? Ask the person who invited you.
+        They can give you a new temporary password in a minute.</div>
       <label for="fp-email">Email</label>
       <input id="fp-email" type="email" autocomplete="email" autocapitalize="none" spellcheck="false" inputmode="email">
       <p class="err" role="alert"></p>
@@ -240,14 +262,30 @@
       i.value = i.value.replace(/\D/g, "").slice(0, 6);
     }));
 
+    let suMode = "phone";
+    function setMode(m) {
+      suMode = m;
+      document.querySelectorAll("#su-seg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === m));
+      $("#su-phone-row").hidden = m !== "phone";
+      $("#su-email-row").hidden = m !== "email";
+      $("#su-go").textContent = m === "phone" ? "Create account" : "Send code";
+    }
+    document.querySelectorAll("#su-seg button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+
     function applyConfig(name) {
-      document.querySelectorAll("[data-if-signup]").forEach((e) => (e.hidden = !state.cfg.signup_enabled));
-      if (name === "signup" && !state.cfg.signup_enabled) {
+      const c = state.cfg, phoneOk = c.phone_signup_enabled !== false, emailOk = !!c.signup_enabled;
+      document.querySelectorAll("[data-if-signup]").forEach((e) => (e.hidden = !(phoneOk || emailOk)));
+      $("#su-seg").hidden = !(phoneOk && emailOk);
+      if (!phoneOk && emailOk) setMode("email");
+      if (name === "signup" && !phoneOk && !emailOk) {
         const f = views.signup;
-        f.querySelector(".sub").textContent = state.cfg.email_enabled
-          ? "Creating accounts is turned off. Ask the owner for a login."
-          : "New accounts can't be created until email is set up. Please ask the owner.";
-        f.querySelectorAll("label, input, .hint, .field, button.go").forEach((e) => (e.hidden = true));
+        f.querySelector(".sub").textContent = "Creating accounts is turned off. Ask the owner for a login.";
+        f.querySelectorAll("label, input, .hint, .field, button.go, #su-phone-row, #su-email-row").forEach((e) => (e.hidden = true));
+      }
+      if (!c.email_enabled) {  // no email service yet: password resets go through the owner
+        $("#fp-sub").textContent = "Password resets by email aren't available yet.";
+        $("#fp-phone-note").innerHTML = "Ask the person who invited you. They can give you a <b>new temporary password</b> in a minute.";
+        views.forgot.querySelectorAll("label, input, button.go").forEach((e) => (e.hidden = true));
       }
     }
 
@@ -301,6 +339,14 @@
       const name = $("#su-name").value.trim(), email = $("#su-email").value.trim();
       const password = $("#su-pw").value, invite = $("#su-invite").value.trim();
       need(name, "Please enter your name.", $("#su-name"));
+      if (suMode === "phone") {
+        const phone = $("#su-phone").value.trim();
+        need(phone.replace(/\D/g, "").length >= 10, "Please enter your 10-digit mobile number.", $("#su-phone"));
+        need(password.length >= 8, "Password must be at least 8 characters.", $("#su-pw"));
+        need(invite, "Enter your invite code.", $("#su-invite"));
+        await post("/api/auth/signup/phone", { name, phone, password, invite });
+        return home();
+      }
       need(validEmail(email), "Please enter a valid email address.", $("#su-email"));
       need(password.length >= 8, "Password must be at least 8 characters.", $("#su-pw"));
       need(invite, "Enter your invite code.", $("#su-invite"));
@@ -323,7 +369,7 @@
     }
     views.forgot.addEventListener("submit", (e) => { e.preventDefault(); step(views.forgot, async () => {
       const email = $("#fp-email").value.trim();
-      need(validEmail(email), "Please enter a valid email address.", $("#fp-email"));
+      need(validEmail(email), "Please enter the email you signed up with. (Mobile number? See the note above.)", $("#fp-email"));
       state.email = email;
       await sendReset();
       show("reset", false); cooldown(views.reset);
@@ -350,9 +396,11 @@
     }));
 
     // keep the email typed on one screen when moving to another
-    ["#si-email", "#su-email", "#fp-email"].forEach((id) => $(id).addEventListener("change", (e) => {
-      ["#si-email", "#su-email", "#fp-email"].forEach((o) => { if (!$(o).value) $(o).value = e.target.value; });
-    }));
+    $("#si-email").addEventListener("change", (e) => {
+      const v = e.target.value.trim();
+      const target = v.includes("@") ? ["#su-email", "#fp-email"] : ["#su-phone"];
+      target.forEach((o) => { if (!$(o).value) $(o).value = v; });
+    });
 
     show(fromPath(), false);
     fetch("/api/auth/me").then((r) => r.json()).then((d) => { state.cfg = d; applyConfig(fromPath()); }).catch(() => { });

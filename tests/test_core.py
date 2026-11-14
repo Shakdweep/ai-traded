@@ -364,6 +364,51 @@ class TestAuth(unittest.TestCase):
         self.assertFalse(a.too_many_fails(ip))
 
 
+class TestPhoneAccounts(TestAuth):
+    """Mobile-number sign-up (no OTP) and the owner's Members tools."""
+
+    def test_clean_phone(self):
+        c = self.auth.clean_phone
+        for raw in ("9876543210", "98765 43210", "+91 98765-43210", "09876543210", "919876543210", "(+91) 98765 43210"):
+            self.assertEqual(c(raw), "+919876543210", raw)
+        self.assertEqual(c("+14155550123"), "+14155550123")
+        for bad in ("12345", "5876543210", "+91 5876543210", "98765432", "abcdefghij", "", None, "+9198765432101"):
+            self.assertIsNone(c(bad), bad)
+
+    def test_phone_signup_and_login(self):
+        a = self.auth
+        self.assertIn("invite", a.phone_signup("Kiran", "9876543210", "password123", "nope")[1])
+        self.assertIn("mobile", a.phone_signup("Kiran", "12345", "password123", "join-me")[1])
+        self.assertIn("8", a.phone_signup("Kiran", "9876543210", "short", "join-me")[1])
+        self.assertEqual(a.phone_signup(" Kiran  R ", "98765 43210", "password123", "join-me"), ("+919876543210", None))
+        self.assertEqual(self.outbox, [])  # no OTP
+        self.assertIn("already exists", a.phone_signup("K", "+91 98765 43210", "password123", "join-me")[1])
+        for typed in ("9876543210", "+91 98765 43210", "09876543210"):
+            self.assertEqual(a.check_password(typed, "password123"), "+919876543210", typed)
+        self.assertIsNone(a.check_password("9876543210", "password124"))
+        self.assertEqual(a.read_token(a.make_token("+919876543210")), "+919876543210")
+        self.assertEqual(a.display_name("+919876543210"), "Kiran R")
+        self.assertEqual(a.check_password("owner", "fixed-password-1"), "owner")  # owner username still works
+
+    def test_owner_tools(self):
+        a = self.auth
+        a.phone_signup("Dev", "9123456789", "password123", "join-me")
+        self.assertTrue(a.is_owner("owner"))
+        self.assertFalse(a.is_owner("+919123456789"))
+        self.assertFalse(a.is_owner(None))
+        self.assertEqual([r["id"] for r in a.list_accounts()], ["+919123456789"])
+        old = a.make_token("+919123456789", now=time.time() - 60)
+        temp = a.owner_reset_password("+919123456789")
+        self.assertEqual(len(temp), 10)
+        self.assertIsNone(a.check_password("9123456789", "password123"))
+        self.assertEqual(a.check_password("9123456789", temp), "+919123456789")
+        self.assertIsNone(a.read_token(old))  # signed out by the reset
+        self.assertIsNone(a.owner_reset_password("+910000000000"))
+        self.assertTrue(a.owner_remove("+919123456789"))
+        self.assertIsNone(a.check_password("9123456789", temp))
+        self.assertFalse(a.owner_remove("+919123456789"))
+
+
 class TestPostgresTranslation(unittest.TestCase):
     """The SQL used with SQLite is translated for Postgres (Neon) when DATABASE_URL is set."""
 

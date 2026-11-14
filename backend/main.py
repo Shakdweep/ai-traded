@@ -182,7 +182,7 @@ async def login(request: Request, body: dict = Body(...)):
     user = await run(auth.check_password, ident, body.get("password"))
     if not user:
         auth.record_fail(ip)
-        return JSONResponse({"error": "Wrong email or password."}, status_code=401)
+        return JSONResponse({"error": "Wrong email/mobile number or password."}, status_code=401)
     auth.clear_fails(ip)
     return _signed_in(request, user)
 
@@ -197,6 +197,13 @@ async def signup_start(request: Request, body: dict = Body(...)):
 @app.post("/api/auth/signup/verify")
 async def signup_verify(request: Request, body: dict = Body(...)):
     user, err = await _guarded(request, auth.signup_verify, body.get("email"), body.get("code"))
+    return err or _signed_in(request, user)
+
+
+@app.post("/api/auth/signup/phone")
+async def signup_phone(request: Request, body: dict = Body(...)):
+    user, err = await _guarded(request, auth.phone_signup, body.get("name"), body.get("phone"),
+                               body.get("password"), body.get("invite"), count_success=True)
     return err or _signed_in(request, user)
 
 
@@ -223,8 +230,37 @@ async def logout():
 async def me(request: Request):
     user = auth.current_user(request)
     return {"auth_enabled": auth.ENABLED, "signup_enabled": auth.SIGNUP_ENABLED,
-            "email_enabled": auth.EMAIL_ENABLED, "user": user,
+            "phone_signup_enabled": auth.PHONE_SIGNUP_ENABLED,
+            "email_enabled": auth.EMAIL_ENABLED, "user": user, "owner": auth.is_owner(user),
             "name": await run(auth.display_name, user) if user else None}
+
+
+def _require_owner(request):
+    if not auth.is_owner(auth.current_user(request)):
+        raise HTTPException(403, "Only the owner can do this.")
+
+
+@app.get("/api/admin/accounts")
+async def admin_accounts(request: Request):
+    _require_owner(request)
+    return {"accounts": await run(auth.list_accounts)}
+
+
+@app.post("/api/admin/reset")
+async def admin_reset(request: Request, body: dict = Body(...)):
+    _require_owner(request)
+    temp = await run(auth.owner_reset_password, body.get("id"))
+    if not temp:
+        raise HTTPException(404, "No such member.")
+    return {"ok": True, "temp_password": temp}
+
+
+@app.post("/api/admin/remove")
+async def admin_remove(request: Request, body: dict = Body(...)):
+    _require_owner(request)
+    if not await run(auth.owner_remove, body.get("id")):
+        raise HTTPException(404, "No such member.")
+    return {"ok": True}
 
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
