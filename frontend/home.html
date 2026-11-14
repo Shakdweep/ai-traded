@@ -259,7 +259,7 @@
     });
     // if the owner turned sign-up off, send "Create account" buttons to sign in instead
     fetch("/api/auth/me").then((r) => r.json()).then((d) => {
-      if (!d.signup_enabled) document.querySelectorAll("[data-signup]").forEach((a) => {
+      if (!d.signup_enabled && !d.phone_signup_enabled) document.querySelectorAll("[data-signup]").forEach((a) => {
         a.href = "/login"; a.textContent = "Sign in";
       });
     }).catch(() => { });
