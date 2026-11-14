@@ -35,7 +35,7 @@ def env(name, default=""):
 
 DB_PATH = DATA_DIR / "trader.db"
 HOST = env("TRADER_HOST", "127.0.0.1")
-PORT = int(env("TRADER_PORT", "8000"))
+PORT = int(env("TRADER_PORT") or env("PORT", "8000"))  # PORT is set by hosts like Render
 
 # Background refresh
 BACKGROUND_UNIVERSE = env("TRADER_BACKGROUND_UNIVERSE", "nifty100")
