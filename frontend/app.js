@@ -151,8 +151,10 @@ try { const t = localStorage.getItem("theme"); if (t) document.documentElement.d
 // signed-in user + log out (only shown when the invite-only login is on)
 api("/auth/me").then((d) => {
   if (!d || !d.auth_enabled || !d.user) return;
-  $("#user-name").textContent = d.user;
-  $("#user-av").textContent = d.user.slice(0, 1).toUpperCase();
+  const name = d.name || d.user;
+  $("#user-name").textContent = name;
+  $("#user-name").title = d.user;
+  $("#user-av").textContent = name.slice(0, 1).toUpperCase();
   $("#user-box").hidden = false;
 }).catch(() => { });
 $("#logout-btn").addEventListener("click", async () => {

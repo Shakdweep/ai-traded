@@ -7,6 +7,10 @@
 #   TRADER_INVITE_CODE  the code friends type on "Create account"
 #   TRADER_USERS        optional fixed accounts that survive restarts, e.g.  yourname:long-password
 # If neither is set, the hosted site stays locked.
+#
+# Email for sign-up codes and "forgot password" (backend/mailer.py). Set ONE option in Render -> Environment:
+#   Gmail made just for AI Traded: SMTP_HOST=smtp.gmail.com SMTP_PORT=465 SMTP_USER=<gmail> SMTP_PASS=<app password>
+#   Resend with a verified domain:  RESEND_API_KEY=re_...  MAIL_FROM="AI Traded <no-reply@your-domain>"
 services:
   - type: web
     name: ai-traded

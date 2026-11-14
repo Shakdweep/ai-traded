@@ -14,7 +14,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import alerts, auth, config, db, paper, services
+from . import alerts, auth, config, db, mailer, paper, services
 from .analysis import fundamentals
 from .market import calendar as cal
 from .market import universe, yahoo
@@ -128,21 +128,47 @@ def _page(name):
     return FileResponse(Path(WEB) / name, headers={"Cache-Control": "no-cache"})
 
 
-@app.get("/login")
-async def login_page(request: Request):
+def _auth_page(request):
     if not auth.ENABLED or auth.current_user(request):
         return RedirectResponse("/", status_code=303)
-    return _page("login.html")
+    return _page("login.html")  # one page; sign in / create account / forgot is chosen by the URL
+
+
+@app.get("/login")
+async def login_page(request: Request):
+    return _auth_page(request)
 
 
 @app.get("/signup")
 async def signup_page(request: Request):
-    if not auth.ENABLED or auth.current_user(request):
-        return RedirectResponse("/", status_code=303)
-    return _page("login.html")  # same page, sign-up mode (chosen by the URL)
+    return _auth_page(request)
+
+
+@app.get("/forgot")
+async def forgot_page(request: Request):
+    return _auth_page(request)
 
 
 TOO_MANY = "Too many attempts. Please wait 15 minutes and try again."
+
+
+def _signed_in(request, user):
+    resp = JSONResponse({"ok": True, "user": user})
+    auth.set_session(resp, request, user)
+    return resp
+
+
+async def _guarded(request, fn, *args, count_success=False):
+    """Run an auth step with the per-IP brute-force guard. fn returns (value, error)."""
+    ip = auth.client_ip(request)
+    if auth.too_many_fails(ip):
+        return None, JSONResponse({"error": TOO_MANY}, status_code=429)
+    value, error = await run(fn, *args)
+    if error or count_success:  # sending an email also counts, so codes can't be sprayed
+        auth.record_fail(ip)
+    if error:
+        return None, JSONResponse({"error": error}, status_code=400)
+    return value, None
 
 
 @app.post("/api/auth/login")
@@ -152,28 +178,38 @@ async def login(request: Request, body: dict = Body(...)):
     ip = auth.client_ip(request)
     if auth.too_many_fails(ip):
         return JSONResponse({"error": TOO_MANY}, status_code=429)
-    user = await run(auth.check_password, body.get("username"), body.get("password"))
+    ident = body.get("email") or body.get("username")
+    user = await run(auth.check_password, ident, body.get("password"))
     if not user:
         auth.record_fail(ip)
-        return JSONResponse({"error": "Wrong username or password."}, status_code=401)
+        return JSONResponse({"error": "Wrong email or password."}, status_code=401)
     auth.clear_fails(ip)
-    resp = JSONResponse({"ok": True, "user": user})
-    auth.set_session(resp, request, user)
-    return resp
+    return _signed_in(request, user)
 
 
-@app.post("/api/auth/signup")
-async def signup(request: Request, body: dict = Body(...)):
-    ip = auth.client_ip(request)
-    if auth.too_many_fails(ip):
-        return JSONResponse({"error": TOO_MANY}, status_code=429)
-    user, error = await run(auth.create_user, body.get("username"), body.get("password"), body.get("invite"))
-    if error:
-        auth.record_fail(ip)
-        return JSONResponse({"error": error}, status_code=400)
-    resp = JSONResponse({"ok": True, "user": user})
-    auth.set_session(resp, request, user)
-    return resp
+@app.post("/api/auth/signup/start")
+async def signup_start(request: Request, body: dict = Body(...)):
+    masked, err = await _guarded(request, auth.signup_start, body.get("name"), body.get("email"),
+                                 body.get("password"), body.get("invite"), count_success=True)
+    return err or {"ok": True, "sent_to": masked}
+
+
+@app.post("/api/auth/signup/verify")
+async def signup_verify(request: Request, body: dict = Body(...)):
+    user, err = await _guarded(request, auth.signup_verify, body.get("email"), body.get("code"))
+    return err or _signed_in(request, user)
+
+
+@app.post("/api/auth/forgot/start")
+async def forgot_start(request: Request, body: dict = Body(...)):
+    masked, err = await _guarded(request, auth.forgot_start, body.get("email"), count_success=True)
+    return err or {"ok": True, "sent_to": masked}
+
+
+@app.post("/api/auth/forgot/verify")
+async def forgot_verify(request: Request, body: dict = Body(...)):
+    user, err = await _guarded(request, auth.forgot_verify, body.get("email"), body.get("code"), body.get("password"))
+    return err or _signed_in(request, user)
 
 
 @app.post("/api/auth/logout")
@@ -185,7 +221,10 @@ async def logout():
 
 @app.get("/api/auth/me")
 async def me(request: Request):
-    return {"auth_enabled": auth.ENABLED, "signup_enabled": auth.SIGNUP_ENABLED, "user": auth.current_user(request)}
+    user = auth.current_user(request)
+    return {"auth_enabled": auth.ENABLED, "signup_enabled": auth.SIGNUP_ENABLED,
+            "email_enabled": auth.EMAIL_ENABLED, "user": user,
+            "name": await run(auth.display_name, user) if user else None}
 
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
@@ -216,7 +255,8 @@ async def status():
                    "restored": bool(v.get("restored_from_disk")), "analysed": v.get("analysed"),
                    "errors": len(v.get("errors", {}))} for (k, m), v in services.SCANS.items()],
         "running": [list(x) for x in services._running],
-        "storage": db.backend_name(),  # "postgres" when DATABASE_URL is set, else "sqlite"
+        "storage": db.backend_name(),
+        "email": mailer.describe(),  # "postgres" when DATABASE_URL is set, else "sqlite"
         "paper_only": True,
     }
 

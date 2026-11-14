@@ -23,7 +23,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USING_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
 # tables whose INSERTs return the new row id
-_ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal"}
+_ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal", "email_codes"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS journal (
 CREATE TABLE IF NOT EXISTS users (
   username TEXT PRIMARY KEY, pw_hash TEXT NOT NULL, salt TEXT NOT NULL, created_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS signals_ts ON signals(ts);
+CREATE TABLE IF NOT EXISTS accounts (
+  email TEXT PRIMARY KEY, name TEXT NOT NULL, pw_hash TEXT NOT NULL, salt TEXT NOT NULL,
+  created_at REAL NOT NULL, last_login REAL, pw_changed_at REAL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS email_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL,
+  payload TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL, attempts INTEGER DEFAULT 0,
+  used INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS email_codes_lookup ON email_codes(email, purpose, created_at);
 """
 
 DEFAULT_SETTINGS = {

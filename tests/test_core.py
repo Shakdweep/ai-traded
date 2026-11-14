@@ -2,11 +2,13 @@
 Run:  .venv/Scripts/python -m unittest discover -s tests -v
 """
 
+import base64
 import datetime
 import math
 import os
 import random
 import tempfile
+import time
 import unittest
 
 os.environ["TRADER_DATA_DIR"] = tempfile.mkdtemp(prefix="trader-test-")
@@ -225,35 +227,32 @@ if __name__ == "__main__":
 
 
 class TestAuth(unittest.TestCase):
-    """Invite-only login: sessions, fixed accounts and self-created accounts."""
+    """Invite-only accounts: owner logins, email sign-up with a code, forgot password."""
 
     def setUp(self):
-        from backend import auth
-        self.auth = auth
-        self._saved = (auth.USERS, auth.INVITE_CODE, auth.SIGNUP_ENABLED, auth.FILE_USERS, auth.INVITE_HASH)
+        from backend import auth, mailer
+        self.auth, self.mailer = auth, mailer
+        self._saved = (auth.USERS, auth.INVITE_CODE, auth.INVITE_REQUIRED, auth.SIGNUP_ENABLED,
+                       auth.EMAIL_ENABLED, auth.FILE_USERS, auth.INVITE_HASH, mailer.send)
         auth.USERS = {"owner": "fixed-password-1"}
         auth.FILE_USERS, auth.INVITE_HASH = {}, ""
-        auth.INVITE_CODE, auth.SIGNUP_ENABLED = "join-me", True
+        auth.INVITE_CODE, auth.INVITE_REQUIRED, auth.SIGNUP_ENABLED, auth.EMAIL_ENABLED = "join-me", True, True, True
+        self.outbox = []
+        mailer.send = lambda to, subject, text, html: self.outbox.append((to, subject, text))
         db.db()
-        db.x("DELETE FROM users")
+        for t in ("users", "accounts", "email_codes"):
+            db.x("DELETE FROM %s" % t)
 
     def tearDown(self):
-        (self.auth.USERS, self.auth.INVITE_CODE, self.auth.SIGNUP_ENABLED,
-         self.auth.FILE_USERS, self.auth.INVITE_HASH) = self._saved
-
-    def test_hashed_access_file_entries(self):
         a = self.auth
-        a.FILE_USERS = {"boss": a.make_hash("boss-secret-pass")}
-        a.INVITE_CODE, a.INVITE_HASH = "", a.make_hash("hashed-invite")
-        self.assertNotIn("boss-secret-pass", a.FILE_USERS["boss"])
-        self.assertEqual(a.check_password("BOSS", "boss-secret-pass"), "boss")
-        self.assertIsNone(a.check_password("boss", "boss-secret-pas"))
-        self.assertEqual(a.read_token(a.make_token("boss")), "boss")
-        self.assertIn("invite", a.create_user("pal1", "password123", "hashed-invitE")[1])
-        self.assertEqual(a.create_user("pal1", "password123", " hashed-invite "), ("pal1", None))
-        self.assertIsNotNone(a.create_user("boss", "password123", "hashed-invite")[1])  # name taken
+        (a.USERS, a.INVITE_CODE, a.INVITE_REQUIRED, a.SIGNUP_ENABLED, a.EMAIL_ENABLED, a.FILE_USERS,
+         a.INVITE_HASH, self.mailer.send) = self._saved
 
-    def test_fixed_account_and_token(self):
+    def last_code(self):
+        import re
+        return re.search(r"\b(\d{6})\b", self.outbox[-1][2]).group(1)
+
+    def test_owner_login_and_token(self):
         a = self.auth
         self.assertEqual(a.check_password("Owner", "fixed-password-1"), "owner")
         self.assertIsNone(a.check_password("owner", "wrong"))
@@ -262,26 +261,97 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(a.read_token(tok), "owner")
         self.assertIsNone(a.read_token(tok[:-4] + "AAAA"))           # tampered
         self.assertIsNone(a.read_token(a.make_token("owner", now=1)))  # expired
+        legacy = base64.urlsafe_b64encode(("owner|%d|%s" % (int(time.time()) + 600, a._sign("owner|%d" % (
+            int(time.time()) + 600)))).encode()).decode()
+        self.assertEqual(a.read_token(legacy), "owner")                 # older seconds-based cookie still works
         self.assertIsNone(a.read_token("not-a-token"))
 
-    def test_signup_rules(self):
+    def test_hashed_access_file_entries(self):
         a = self.auth
-        self.assertIn("invite", a.create_user("friend1", "password123", "wrong")[1])
-        self.assertIsNotNone(a.create_user("x", "password123", "join-me")[1])        # name too short
-        self.assertIsNotNone(a.create_user("friend1", "short", "join-me")[1])        # password too short
-        self.assertIsNotNone(a.create_user("owner", "password123", "join-me")[1])    # taken by fixed account
-        self.assertEqual(a.create_user("Friend1", "password123", "join-me"), ("friend1", None))
-        self.assertIsNotNone(a.create_user("friend1", "password123", "join-me")[1])  # duplicate
-        row = db.q("SELECT pw_hash FROM users WHERE username='friend1'", one=True)
-        self.assertNotIn("password123", row["pw_hash"])                             # stored hashed
-        self.assertEqual(a.check_password("friend1", "password123"), "friend1")
-        self.assertIsNone(a.check_password("friend1", "password124"))
-        self.assertEqual(a.read_token(a.make_token("friend1")), "friend1")
+        a.FILE_USERS = {"boss": a.make_hash("boss-secret-pass")}
+        a.INVITE_CODE, a.INVITE_HASH = "", a.make_hash("hashed-invite")
+        self.assertNotIn("boss-secret-pass", a.FILE_USERS["boss"])
+        self.assertEqual(a.check_password("BOSS", "boss-secret-pass"), "boss")
+        self.assertIsNone(a.check_password("boss", "boss-secret-pas"))
+        self.assertIn("invite", a.signup_start("Pal", "pal@example.com", "password123", "wrong")[1])
+        self.assertIsNone(a.signup_start("Pal", "pal@example.com", "password123", " hashed-invite ")[1])
 
-    def test_signup_off_without_invite_code(self):
+    def test_signup_with_emailed_code(self):
         a = self.auth
-        a.SIGNUP_ENABLED = False
-        self.assertIsNotNone(a.create_user("friend2", "password123", "join-me")[1])
+        self.assertIn("invite", a.signup_start("Ravi", "ravi@example.com", "password123", "nope")[1])
+        self.assertIn("name", a.signup_start(" ", "ravi@example.com", "password123", "join-me")[1])
+        self.assertIn("email", a.signup_start("Ravi", "not-an-email", "password123", "join-me")[1])
+        self.assertIn("8", a.signup_start("Ravi", "ravi@example.com", "short", "join-me")[1])
+        self.assertEqual(self.outbox, [])
+        masked, err = a.signup_start("Ravi  Kumar", "Ravi@Example.com", "password123", "join-me")
+        self.assertIsNone(err)
+        self.assertEqual(masked, "ra••@example.com")
+        self.assertEqual(self.outbox[-1][0], "ravi@example.com")
+        code = self.last_code()
+        row = db.q("SELECT * FROM email_codes", one=True)
+        self.assertNotIn(code, row["code_hash"])            # only a keyed hash is stored
+        self.assertNotIn("password123", row["payload"])     # and only the password hash
+        self.assertIsNone(a.get_account("ravi@example.com"))  # not created until confirmed
+        wrong = "000000" if code != "000000" else "111111"
+        self.assertIn("4 tries left", a.signup_verify("ravi@example.com", wrong)[1])
+        self.assertEqual(a.signup_verify("ravi@example.com", code), ("ravi@example.com", None))
+        acct = a.get_account("ravi@example.com")
+        self.assertEqual(acct["name"], "Ravi Kumar")
+        self.assertIn("expired", a.signup_verify("ravi@example.com", code)[1])  # one use only
+        self.assertEqual(a.check_password("RAVI@example.com", "password123"), "ravi@example.com")
+        self.assertIsNone(a.check_password("ravi@example.com", "password124"))
+        self.assertEqual(a.read_token(a.make_token("ravi@example.com")), "ravi@example.com")
+        self.assertEqual(a.display_name("ravi@example.com"), "Ravi Kumar")
+        self.assertIn("already exists", a.signup_start("R", "ravi@example.com", "password123", "join-me")[1])
+
+    def test_code_limits(self):
+        a = self.auth
+        t = 1_000_000.0
+        self.assertIsNone(a.signup_start("A", "a@example.com", "password123", "join-me", now=t)[1])
+        self.assertIn("wait a minute", a.signup_start("A", "a@example.com", "password123", "join-me", now=t + 10)[1])
+        self.assertIsNone(a.signup_start("A", "a@example.com", "password123", "join-me", now=t + 61)[1])
+        code = self.last_code()  # only the newest code works
+        for i in range(2, 5):
+            self.assertIsNone(a.signup_start("A", "a@example.com", "password123", "join-me", now=t + 61 * i)[1])
+        self.assertIn("Too many codes", a.signup_start("A", "a@example.com", "password123", "join-me", now=t + 400)[1])
+        newest = self.last_code()
+        if newest != code:
+            self.assertIsNotNone(a.signup_verify("a@example.com", code, now=t + 300)[1])
+        self.assertIn("expired", a.signup_verify("a@example.com", newest, now=t + 61 * 4 + 601)[1])
+
+    def test_five_wrong_guesses_kill_the_code(self):
+        a = self.auth
+        a.signup_start("B", "b@example.com", "password123", "join-me")
+        code = self.last_code()
+        wrong = "000000" if code != "000000" else "111111"
+        for _ in range(5):
+            self.assertIsNotNone(a.signup_verify("b@example.com", wrong)[1])
+        self.assertIn("Too many wrong tries", a.signup_verify("b@example.com", code)[1])
+
+    def test_forgot_password(self):
+        a = self.auth
+        a.signup_start("Meera", "meera@example.com", "old-password", "join-me")
+        a.signup_verify("meera@example.com", self.last_code())
+        old_session = a.make_token("meera@example.com", now=time.time() - 60)
+        self.assertEqual(a.read_token(old_session), "meera@example.com")
+        # unknown email: same answer, but no email is sent
+        sent = len(self.outbox)
+        self.assertEqual(a.forgot_start("ghost@example.com"), ("gh•••@example.com", None))
+        self.assertEqual(len(self.outbox), sent)
+        self.assertIsNone(a.forgot_start("meera@example.com")[1])
+        code = self.last_code()
+        self.assertIn("8", a.forgot_verify("meera@example.com", code, "short")[1])
+        self.assertEqual(a.forgot_verify("meera@example.com", code, "new-password-1"), ("meera@example.com", None))
+        self.assertIsNone(a.check_password("meera@example.com", "old-password"))
+        self.assertEqual(a.check_password("meera@example.com", "new-password-1"), "meera@example.com")
+        self.assertIsNone(a.read_token(old_session))  # older sessions are signed out
+        self.assertEqual(a.read_token(a.make_token("meera@example.com", now=time.time() + 5)), "meera@example.com")
+
+    def test_email_off(self):
+        a = self.auth
+        a.EMAIL_ENABLED = False
+        self.assertIn("Email isn't set up", a.signup_start("C", "c@example.com", "password123", "join-me")[1])
+        self.assertIn("Email isn't set up", a.forgot_start("c@example.com")[1])
 
     def test_rate_limit(self):
         a = self.auth
