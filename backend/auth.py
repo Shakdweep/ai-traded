@@ -247,12 +247,16 @@ def check_password(user, password):
     user = login_id(user)
     password = password or ""
     if is_account_id(user):
-        acct = get_account(user)
-        if acct and hmac.compare_digest(_hash(password, bytes.fromhex(acct["salt"])), acct["pw_hash"]):
-            if (acct.get("status") or "active") == "active":
-                db.x("UPDATE accounts SET last_login=? WHERE email=?", (time.time(), user))
-            return user
-        if not acct:
+        candidates = [a for a in [get_account(user)] if a]
+        if not candidates and "@" in user:
+            # a mobile-number account can also sign in with the optional email it added
+            candidates = db.q("SELECT * FROM accounts WHERE contact_email=? ORDER BY created_at", (user,))
+        for acct in candidates:
+            if hmac.compare_digest(_hash(password, bytes.fromhex(acct["salt"])), acct["pw_hash"]):
+                if (acct.get("status") or "active") == "active":
+                    db.x("UPDATE accounts SET last_login=? WHERE email=?", (time.time(), acct["email"]))
+                return acct["email"]  # the account's login id
+        if not candidates:
             _hash(password, b"0" * 16)  # same work for unknown emails so timing does not reveal them
         return None
     if user in USERS:

@@ -550,3 +550,15 @@ class TestPostgresTranslation(unittest.TestCase):
                  [(1.0, "A", "swing", "WAIT"), (2.0, "B", "swing", "WAIT")])
         self.assertEqual(len(db.q("SELECT * FROM signals")), 2)
         db.xmany("INSERT INTO signals(ts, symbol, mode, rating) VALUES(?,?,?,?)", [])  # no-op
+
+
+class TestSignInWithAddedEmail(TestAuth):
+    def test_mobile_account_signs_in_with_its_email(self):
+        a = self.auth
+        a.phone_signup("Arti", "92342 37102", "secret-pass-1", "join-me", contact_email="Arti@Example.com")
+        a.approve("+919234237102")
+        self.assertEqual(a.check_password("arti@example.com", "secret-pass-1"), "+919234237102")
+        self.assertEqual(a.check_password(" ARTI@example.com ", "secret-pass-1"), "+919234237102")
+        self.assertIsNone(a.check_password("arti@example.com", "wrong-pass"))
+        self.assertEqual(a.check_password("9234237102", "secret-pass-1"), "+919234237102")
+        self.assertIsNotNone(a.get_account("+919234237102")["last_login"])

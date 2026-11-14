@@ -169,6 +169,8 @@
       <label for="su-pw">Password</label>
       <div class="field"><input id="su-pw" type="password" autocomplete="new-password"><button type="button" class="eye">Show</button></div>
       <p class="hint">At least 8 characters.</p>
+      <label for="su-pw2">Repeat password</label>
+      <div class="field"><input id="su-pw2" type="password" autocomplete="new-password"><button type="button" class="eye">Show</button></div>
       <label for="su-invite">Invite code</label>
       <input id="su-invite" autocomplete="off" autocapitalize="none" spellcheck="false">
       <p class="hint">Your personal code from the person who invited you. It works once.</p>
@@ -355,6 +357,7 @@
       const name = $("#su-name").value.trim(), email = $("#su-email").value.trim();
       const password = $("#su-pw").value, invite = $("#su-invite").value.trim();
       need(name, "Please enter your name.", $("#su-name"));
+      need(password === $("#su-pw2").value, "The two passwords don't match. Please type them again.", $("#su-pw2"));
       if (suMode === "phone") {
         const phone = $("#su-phone").value.trim();
         need(phone.replace(/\D/g, "").length >= 10, "Please enter your 10-digit mobile number.", $("#su-phone"));
