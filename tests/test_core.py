@@ -230,14 +230,28 @@ class TestAuth(unittest.TestCase):
     def setUp(self):
         from backend import auth
         self.auth = auth
-        self._saved = (auth.USERS, auth.INVITE_CODE, auth.SIGNUP_ENABLED)
+        self._saved = (auth.USERS, auth.INVITE_CODE, auth.SIGNUP_ENABLED, auth.FILE_USERS, auth.INVITE_HASH)
         auth.USERS = {"owner": "fixed-password-1"}
+        auth.FILE_USERS, auth.INVITE_HASH = {}, ""
         auth.INVITE_CODE, auth.SIGNUP_ENABLED = "join-me", True
         db.db()
         db.x("DELETE FROM users")
 
     def tearDown(self):
-        self.auth.USERS, self.auth.INVITE_CODE, self.auth.SIGNUP_ENABLED = self._saved
+        (self.auth.USERS, self.auth.INVITE_CODE, self.auth.SIGNUP_ENABLED,
+         self.auth.FILE_USERS, self.auth.INVITE_HASH) = self._saved
+
+    def test_hashed_access_file_entries(self):
+        a = self.auth
+        a.FILE_USERS = {"boss": a.make_hash("boss-secret-pass")}
+        a.INVITE_CODE, a.INVITE_HASH = "", a.make_hash("hashed-invite")
+        self.assertNotIn("boss-secret-pass", a.FILE_USERS["boss"])
+        self.assertEqual(a.check_password("BOSS", "boss-secret-pass"), "boss")
+        self.assertIsNone(a.check_password("boss", "boss-secret-pas"))
+        self.assertEqual(a.read_token(a.make_token("boss")), "boss")
+        self.assertIn("invite", a.create_user("pal1", "password123", "hashed-invitE")[1])
+        self.assertEqual(a.create_user("pal1", "password123", " hashed-invite "), ("pal1", None))
+        self.assertIsNotNone(a.create_user("boss", "password123", "hashed-invite")[1])  # name taken
 
     def test_fixed_account_and_token(self):
         a = self.auth

@@ -16,11 +16,13 @@ or sent to the browser; a signed, HttpOnly session cookie is issued on login.
 import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
 import threading
 import time
+from pathlib import Path
 
 from . import db
 
@@ -47,11 +49,22 @@ def _parse_users(raw):
     return users
 
 
+def _load_access_file(path):
+    """backend/access.json holds only salted PBKDF2 hashes ("salt_hex$hash_hex"), never plain
+    passwords, so it is safe to commit. Used only on the hosted site; env vars take priority."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {k.lower(): v for k, v in (data.get("users") or {}).items()}, data.get("invite") or ""
+    except (OSError, ValueError):
+        return {}, ""
+
+
+ON_HOST = bool(os.environ.get("RENDER"))  # Render sets RENDER=true on every service
 USERS = _parse_users(os.environ.get("TRADER_USERS", ""))
 INVITE_CODE = os.environ.get("TRADER_INVITE_CODE", "").strip()
-SIGNUP_ENABLED = bool(INVITE_CODE)
-ON_HOST = bool(os.environ.get("RENDER"))  # Render sets RENDER=true on every service
-ENABLED = bool(USERS) or SIGNUP_ENABLED
+FILE_USERS, INVITE_HASH = _load_access_file(Path(__file__).with_name("access.json")) if ON_HOST else ({}, "")
+SIGNUP_ENABLED = bool(INVITE_CODE or INVITE_HASH)
+ENABLED = bool(USERS or FILE_USERS) or SIGNUP_ENABLED
 LOCKED = ON_HOST and not ENABLED          # hosted but no accounts or invite code configured
 SECRET = (os.environ.get("TRADER_SECRET_KEY") or secrets.token_hex(32)).encode()
 
@@ -65,19 +78,40 @@ def _hash(password, salt):
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ROUNDS).hex()
 
 
+def make_hash(secret):
+    """'salt_hex$hash_hex' for backend/access.json."""
+    salt = secrets.token_bytes(16)
+    return "%s$%s" % (salt.hex(), _hash(secret, salt))
+
+
+def _matches_hash(secret, stored):
+    try:
+        salt_hex, digest = stored.split("$", 1)
+        return hmac.compare_digest(_hash(secret, bytes.fromhex(salt_hex)), digest)
+    except ValueError:
+        return False
+
+
 def _db_user(name):
     return db.q("SELECT username, pw_hash, salt FROM users WHERE username=?", (name,), one=True)
 
 
 def user_exists(name):
-    return name in USERS or _db_user(name) is not None
+    return name in USERS or name in FILE_USERS or _db_user(name) is not None
+
+
+def _invite_ok(invite):
+    invite = (invite or "").strip()
+    if INVITE_CODE:
+        return hmac.compare_digest(invite.encode(), INVITE_CODE.encode())
+    return bool(INVITE_HASH) and _matches_hash(invite, INVITE_HASH)
 
 
 def create_user(username, password, invite):
     """Create a self-registered account. Returns (username, None) or (None, error message)."""
     if not SIGNUP_ENABLED:
         return None, "Creating accounts is turned off. Ask the owner for a login."
-    if not hmac.compare_digest((invite or "").strip().encode(), INVITE_CODE.encode()):
+    if not _invite_ok(invite):
         return None, "That invite code isn't right."
     name = (username or "").strip().lower()
     if not USERNAME_RE.match(name):
@@ -97,6 +131,8 @@ def check_password(user, password):
     password = password or ""
     if user in USERS:
         return user if hmac.compare_digest(password.encode(), USERS[user].encode()) else None
+    if user in FILE_USERS:
+        return user if _matches_hash(password, FILE_USERS[user]) else None
     row = _db_user(user)
     if row:
         return user if hmac.compare_digest(_hash(password, bytes.fromhex(row["salt"])), row["pw_hash"]) else None

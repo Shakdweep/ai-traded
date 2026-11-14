@@ -1,0 +1,7 @@
+{
+  "_note": "Salted PBKDF2-SHA256 hashes only (salt$hash). Safe to commit. Used only on the hosted site.",
+  "users": {
+    "shakdweep": "5e07b17fa0a7b1d3f4b0de394f68f8cd$0141be8e602bd2162f807c416ffd2be581168a39e98b75a8be8fab8b2a8518e0"
+  },
+  "invite": "64bebcd582babafb9f3d210bd047f3c9$de0cba4069ba74a36f326faa94f33f31000bde81f541cfd1ef87c4c901878e49"
+}
