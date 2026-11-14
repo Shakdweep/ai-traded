@@ -595,6 +595,11 @@ async def paper_summary():
     return await run(paper.summary, db.get_settings())
 
 
+@app.post("/api/paper/stop")
+async def paper_stop(body: dict = Body(...)):
+    return await run(paper.raise_stop, int(body.get("position_id", 0)), body.get("stop"))
+
+
 @app.post("/api/journal")
 async def journal(body: dict = Body(...)):
     if not body.get("text"):

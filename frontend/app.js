@@ -616,6 +616,28 @@ async function viewWatchlist() {
 }
 
 // ------------------------------------------------------------------ PAPER
+// exit check (HOLD / TIGHTEN STOP / BOOK PARTIAL / EXIT) for an open paper position
+const EXIT_CLS = { HOLD: "d-TRADE", "TIGHTEN STOP": "d-WAIT", "BOOK PARTIAL": "d-INFO", EXIT: "d-NO" };
+function exitBadge(c) {
+  if (!c || !c.verdict) return '<span class="dim small">–</span>';
+  return `<span class="exit-pill ${EXIT_CLS[c.verdict]}">${esc(c.verdict)}</span>`;
+}
+function exitCard(x) {
+  const c = x.exit_check || {};
+  const why = (c.reasons || []).map(([tone, t]) => `<li class="x-${esc(tone)}">${esc(t)}</li>`).join("");
+  const stats = [
+    c.r_multiple != null ? `<span><b>${c.r_multiple > 0 ? "+" : ""}${fmt(c.r_multiple, 1)}R</b> so far</span>` : "",
+    c.pnl_pct != null ? `<span class="${cls(c.pnl_pct)}">${pct(c.pnl_pct)}</span>` : "",
+    c.sessions_held != null ? `<span>${c.sessions_held} session${c.sessions_held === 1 ? "" : "s"} held</span>` : "",
+    c.basis ? `<span class="dim">${esc(c.basis)}</span>` : ""].filter(Boolean).join("");
+  return `<div class="exit-card">
+    <div class="row between"><div class="row"><b>${esc(x.symbol)}</b> ${exitBadge(c)}</div><div class="exit-stats">${stats}</div></div>
+    <ul class="exit-why">${why}</ul>
+    ${c.suggested_stop ? `<div class="row"><button class="btn sm good" data-stop="${x.id}" data-to="${c.suggested_stop}">Raise stop to ₹${fmt(c.suggested_stop)}</button>
+      <span class="dim small">Stops only ever move up.</span></div>` : ""}
+  </div>`;
+}
+
 async function viewPaper() {
   app.innerHTML = `${disclaimer}<div id="pp"><div class="loading"><span class="spinner"></span> Loading paper portfolio…</div></div>`;
   const load = async () => {
@@ -631,7 +653,8 @@ async function viewPaper() {
       <div class="card idx"><span class="name">Unrealised P&amp;L</span><div class="px ${cls(st.unrealised_pnl)}">${inr(st.unrealised_pnl)}</div><div class="dim small">${p.open.length} open position(s), delayed prices</div></div>
       <div class="card idx"><span class="name">Win rate</span><div class="px">${st.win_rate == null ? "–" : st.win_rate + "%"}</div><div class="dim small">${st.trades} closed trade(s)</div></div></div>
       <div style="height:14px"></div><div class="grid g2">
-      <div class="card"><h3>Open positions</h3>${p.open.length ? `<div class="tablewrap"><table class="mini plain"><thead><tr><th>Stock</th><th>Mode</th><th class="n">Qty</th><th class="n">Entry</th><th class="n">Now</th><th class="n">Stop</th><th class="n">T1</th><th class="n">T2</th><th class="n">P&amp;L</th><th></th></tr></thead><tbody>${p.open.map((x) => `<tr><td><a href="#/stock/${esc(x.symbol)}"><b>${esc(x.symbol)}</b></a></td><td>${esc(x.mode)}</td><td class="n">${x.qty}</td><td class="n">${fmt(x.entry_price)}</td><td class="n">${fmt(x.price)} ${freshBadge(x.freshness)}</td><td class="n down">${fmt(x.stop)}</td><td class="n">${fmt(x.target1)}</td><td class="n">${fmt(x.target2)}</td><td class="n ${cls(x.unrealised)}">${inr(x.unrealised)}</td><td><button class="btn sm bad" data-close="${x.id}">Close</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty small">No open paper positions. Propose one from a stock's trade plan.</div>`}
+      <div class="card spanall"><h3>Open positions</h3>${p.open.length ? `<div class="tablewrap"><table class="mini plain"><thead><tr><th>Stock</th><th>Mode</th><th class="n">Qty</th><th class="n">Entry</th><th class="n">Now</th><th class="n">Stop</th><th class="n">T1</th><th class="n">T2</th><th class="n">P&amp;L</th><th>Exit check</th><th></th></tr></thead><tbody>${p.open.map((x) => `<tr><td><a href="#/stock/${esc(x.symbol)}"><b>${esc(x.symbol)}</b></a></td><td>${esc(x.mode)}</td><td class="n">${x.qty}</td><td class="n">${fmt(x.entry_price)}</td><td class="n">${fmt(x.price)} ${freshBadge(x.freshness)}</td><td class="n down">${fmt(x.stop)}</td><td class="n">${fmt(x.target1)}</td><td class="n">${fmt(x.target2)}</td><td class="n ${cls(x.unrealised)}">${inr(x.unrealised)}</td><td>${exitBadge(x.exit_check)}</td><td><button class="btn sm bad" data-close="${x.id}">Close</button></td></tr>`).join("")}</tbody></table></div>
+        <div class="exit-list">${p.open.map(exitCard).join("")}</div>` : `<div class="empty small">No open paper positions. Propose one from a stock's trade plan.</div>`}
         ${pending.length ? `<hr><h3>Awaiting your yes</h3>${pending.map((o) => `<div class="small" style="margin-bottom:8px">#${o.id} BUY ${o.qty} ${esc(o.symbol)} entry ${fmt(o.entry)} SL ${fmt(o.stop)} T1 ${fmt(o.target1)} <div class="row"><input data-yes="${o.id}" placeholder='type "yes"'><button class="btn sm good" data-ok="${o.id}">Confirm</button><button class="btn sm bad" data-no="${o.id}">Decline</button></div></div>`).join("")}` : ""}
         ${queued.length ? `<hr><h3>Approved, queued for the next open</h3>${queued.map((o) => `<div class="small">#${o.id} BUY ${o.qty} ${esc(o.symbol)} in ${fmt(o.entry)} range, SL ${fmt(o.stop)} <button class="btn sm bad" data-no="${o.id}">Cancel</button></div>`).join("")}` : ""}</div>
       <div class="card"><h3>Equity curve <span class="sub">realised, paper</span></h3>${p.equity_curve.length > 1 ? `<div class="chart sm" id="eq" style="height:220px"></div>` : `<div class="empty small">Appears after two closed trades.</div>`}</div>
@@ -643,6 +666,10 @@ async function viewPaper() {
     $("#pp").querySelectorAll("[data-close]").forEach((b) => b.onclick = async () => { if (!confirm("Close this paper position at the latest (delayed) price?")) return; const r = await api("/paper/close", { method: "POST", body: { position_id: +b.dataset.close } }); toast(r.ok ? `Closed, P&L ₹${fmt(r.pnl)}` : esc(r.error)); load(); });
     $("#pp").querySelectorAll("[data-ok]").forEach((b) => b.onclick = async () => { const reply = $(`[data-yes="${b.dataset.ok}"]`).value; const r = await api("/paper/confirm", { method: "POST", body: { order_id: +b.dataset.ok, reply } }); toast(r.ok ? (r.queued ? esc(r.note) : `Filled at ₹${fmt(r.fill_price)}`) : esc(r.error), 7000); load(); });
     $("#pp").querySelectorAll("[data-no]").forEach((b) => b.onclick = async () => { await api("/paper/decline", { method: "POST", body: { order_id: +b.dataset.no } }); load(); });
+    $("#pp").querySelectorAll("[data-stop]").forEach((b) => b.onclick = async () => {
+      const r = await api("/paper/stop", { method: "POST", body: { position_id: +b.dataset.stop, stop: +b.dataset.to } });
+      toast(r.ok ? `Stop raised to ₹${fmt(r.stop)}` : esc(r.error)); load();
+    });
     $("#jr-btn").onclick = async () => { const t = $("#jr").value.trim(); if (!t) return; await api("/journal", { method: "POST", body: { text: t } }); load(); };
   };
   try { await load(); } catch (e) { $("#pp").innerHTML = errorBox(e); }

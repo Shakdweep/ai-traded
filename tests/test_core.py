@@ -562,3 +562,100 @@ class TestSignInWithAddedEmail(TestAuth):
         self.assertIsNone(a.check_password("arti@example.com", "wrong-pass"))
         self.assertEqual(a.check_password("9234237102", "secret-pass-1"), "+919234237102")
         self.assertIsNotNone(a.get_account("+919234237102")["last_login"])
+
+
+class TestExitCheck(unittest.TestCase):
+    """HOLD / TIGHTEN STOP / BOOK PARTIAL / EXIT on synthetic charts (no network)."""
+
+    def setUp(self):
+        from backend.analysis import exitcheck
+        self.ec = exitcheck
+        self.now = datetime.datetime(2026, 1, 1, 12, 0, tzinfo=cal.IST)  # long after the synthetic bars
+
+    def pos(self, bars, back=30, stop_pct=0.93, t1=None, t2=None, qty=10, mode="swing"):
+        entry = bars[-back]["c"]
+        return {"entry_price": entry, "stop": round(entry * stop_pct, 2), "target1": t1, "target2": t2, "qty": qty,
+                "mode": mode, "opened_at": bars[-back]["t"]}
+
+    def run_check(self, bars, pos, price=None, orig_stop=None):
+        return self.ec.evaluate(pos, bars[-1]["c"] if price is None else price, daily_chart={"bars": bars},
+                                settings=dict(db.DEFAULT_SETTINGS), orig_stop=orig_stop, now=self.now)
+
+    def test_uptrend_trails_the_stop(self):
+        bars = daily_bars(300, drift=0.004, vol=0.008, seed=3)
+        pos = self.pos(bars, back=40)
+        r = self.run_check(bars, pos)
+        self.assertGreater(bars[-1]["c"], pos["entry_price"])
+        self.assertEqual(r["verdict"], "TIGHTEN STOP")
+        self.assertGreater(r["suggested_stop"], pos["stop"])
+        self.assertLess(r["suggested_stop"], bars[-1]["c"])
+        self.assertGreater(r["r_multiple"], 1)
+        self.assertEqual(r["sessions_held"], 40)
+
+    def test_stop_hit_is_exit(self):
+        bars = daily_bars(300, drift=0.002, seed=4)
+        pos = self.pos(bars)
+        r = self.run_check(bars, pos, price=pos["stop"] - 1)
+        self.assertEqual(r["verdict"], "EXIT")
+        self.assertTrue(any("at or below your stop" in t for _, t in r["reasons"]))
+
+    def test_targets(self):
+        bars = daily_bars(300, drift=0.002, seed=5)
+        px = bars[-1]["c"]
+        pos = self.pos(bars, t1=px * 0.99, t2=px * 1.2)
+        self.assertEqual(self.run_check(bars, pos)["verdict"], "BOOK PARTIAL")
+        pos = self.pos(bars, t1=px * 0.9, t2=px * 0.99)
+        self.assertEqual(self.run_check(bars, pos)["verdict"], "EXIT")
+        pos = self.pos(bars, t1=px * 0.99, qty=1)  # one share: nothing to split
+        self.assertNotEqual(self.run_check(bars, pos)["verdict"], "BOOK PARTIAL")
+
+    def test_broken_trend_while_losing_is_exit(self):
+        up = daily_bars(260, drift=0.003, seed=6)
+        down = daily_bars(40, start=up[-1]["c"], drift=-0.006, vol=0.006, seed=7)
+        for i, b in enumerate(down):
+            b["t"] = up[-1]["t"] + (i + 1) * 86400
+        bars = up + down
+        pos = self.pos(bars, back=30, stop_pct=0.6)  # wide stop, so the trend rule decides
+        r = self.run_check(bars, pos)
+        self.assertLess(bars[-1]["c"], pos["entry_price"])
+        self.assertEqual(r["verdict"], "EXIT")
+        self.assertTrue(any("EMA 50" in t for _, t in r["reasons"]))
+
+    def test_short_history_and_no_price(self):
+        bars = daily_bars(40, seed=8)
+        r = self.run_check(bars, self.pos(bars, back=10))
+        self.assertEqual(r["verdict"], "HOLD")
+        self.assertTrue(any("Not enough daily history" in t for _, t in r["reasons"]))
+        r = self.ec.evaluate(self.pos(bars, back=10), None, daily_chart={"bars": bars})
+        self.assertIsNone(r["verdict"])
+
+    def test_intraday_square_off(self):
+        bars = daily_bars(5, seed=9)
+        late = datetime.datetime(2026, 1, 2, 15, 5, tzinfo=cal.IST)
+        pos = {"entry_price": 100.0, "stop": 98.0, "target1": None, "target2": None, "qty": 5, "mode": "intraday",
+               "opened_at": int(datetime.datetime(2026, 1, 2, 10, 0, tzinfo=cal.IST).timestamp())}
+        r = self.ec.evaluate(pos, 101.0, bars5=[], settings={"intraday_flat_by": "15:15"}, now=late)
+        self.assertEqual(r["verdict"], "EXIT")
+        self.assertTrue(any("Square-off" in t for _, t in r["reasons"]))
+        early = datetime.datetime(2026, 1, 2, 11, 0, tzinfo=cal.IST)
+        self.assertEqual(self.ec.evaluate(pos, 101.0, bars5=[], settings={"intraday_flat_by": "15:15"},
+                                          now=early)["verdict"], "HOLD")
+
+    def test_raise_stop_only_up_and_below_price(self):
+        from backend import paper
+        db.db()
+        db.x("DELETE FROM paper_positions")
+        with db.as_owner("t@x.com"):
+            pid = db.x("INSERT INTO paper_positions(order_id, symbol, qty, entry_price, stop, mode, opened_at, owner) "
+                       "VALUES(NULL,'INFY',10,100,90,'swing',1,'t@x.com')")
+            saved = (paper.yahoo.chart, paper.yahoo.quote_from_chart)
+            paper.yahoo.chart = lambda *a, **k: {}
+            paper.yahoo.quote_from_chart = lambda ch: {"price": 110.0}
+            try:
+                self.assertIn("only be raised", paper.raise_stop(pid, 85)["error"])
+                self.assertIn("below the current price", paper.raise_stop(pid, 111)["error"])
+                self.assertEqual(paper.raise_stop(pid, 101.5), {"ok": True, "stop": 101.5})
+            finally:
+                paper.yahoo.chart, paper.yahoo.quote_from_chart = saved
+        with db.as_owner("someone-else"):
+            self.assertIn("No open position", paper.raise_stop(pid, 105)["error"])  # not your position

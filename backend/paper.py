@@ -17,6 +17,7 @@ import json
 import time
 
 from . import db
+from .analysis import exitcheck
 from .analysis import risk as rk
 from .market import calendar as cal
 from .market import yahoo
@@ -246,18 +247,55 @@ def close_manual(pid, settings):
     return {"ok": True, "pnl": round(pnl, 2), "price": q["price"]}
 
 
+def exit_check(p, ch5, settings):
+    """HOLD / TIGHTEN STOP / BOOK PARTIAL / EXIT for one open position (never fails the page)."""
+    try:
+        daily = None if p["mode"] == "intraday" else yahoo.chart(yahoo.to_yahoo(p["symbol"]), "1y", "1d")
+        o = db.q("SELECT stop FROM paper_orders WHERE id=?", (p["order_id"],), one=True) if p.get("order_id") else None
+        return exitcheck.evaluate(p, p.get("price"), daily_chart=daily, bars5=(ch5 or {}).get("bars"),
+                                  settings=settings, orig_stop=o["stop"] if o else None)
+    except Exception as e:  # noqa: BLE001 - a data hiccup must not break the paper page
+        return {"verdict": None, "reasons": [("muted", "Exit check unavailable right now (%s)." % type(e).__name__)]}
+
+
+def raise_stop(pid, new_stop):
+    """Move a paper stop UP (never down, never above the latest price)."""
+    p = db.q("SELECT * FROM paper_positions WHERE id=? AND owner=? AND status='open'", (pid, db.owner()), one=True)
+    if not p:
+        return {"ok": False, "error": "No open position with that id."}
+    try:
+        new_stop = round(float(new_stop), 2)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Enter a stop price."}
+    if new_stop <= p["stop"]:
+        return {"ok": False, "error": "A stop can only be raised (it's ₹%.2f now)." % p["stop"]}
+    try:
+        px = yahoo.quote_from_chart(yahoo.chart(yahoo.to_yahoo(p["symbol"]), "5d", "5m", ttl=30))["price"]
+    except yahoo.DataError as e:
+        return {"ok": False, "error": "No price to check against: %s" % e}
+    if px is None or new_stop >= px:
+        return {"ok": False, "error": "The stop must be below the current price (₹%s)." % ("%.2f" % px if px else "?")}
+    db.x("UPDATE paper_positions SET stop=? WHERE id=?", (new_stop, pid))
+    db.x("INSERT INTO journal(ts, symbol, text, owner) VALUES(?,?,?,?)",
+         (time.time(), p["symbol"], "Raised the paper stop from %.2f to %.2f" % (p["stop"], new_stop), db.owner()))
+    return {"ok": True, "stop": new_stop}
+
+
 def summary(settings):
     me = db.owner()
     openpos = db.q("SELECT * FROM paper_positions WHERE owner=? AND status='open' ORDER BY opened_at DESC", (me,))
     closed = db.q("SELECT * FROM paper_positions WHERE owner=? AND status='closed' ORDER BY closed_at", (me,))
     for p in openpos:
+        ch5 = None
         try:
-            q = yahoo.quote_from_chart(yahoo.chart(yahoo.to_yahoo(p["symbol"]), "5d", "5m"))
+            ch5 = yahoo.chart(yahoo.to_yahoo(p["symbol"]), "5d", "5m")
+            q = yahoo.quote_from_chart(ch5)
             p["price"] = q["price"]
             p["freshness"] = q["freshness"]
             p["unrealised"] = round(p["qty"] * (q["price"] - p["entry_price"]), 2)
         except yahoo.DataError:
             p["price"], p["unrealised"] = None, None
+        p["exit_check"] = exit_check(p, ch5, settings)
     eq, cum = [], 0.0
     for c in closed:
         cum += c["pnl"] or 0
