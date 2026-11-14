@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Traded</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo"></span>AI Traded <small>NSE · BSE intelligence</small></div>
+    <div class="pills">
+      <span class="pill" id="mkt-pill"><span class="dot"></span><span>Loading…</span></span>
+      <span class="pill" id="data-pill" title="Data freshness">Data: …</span>
+      <span class="pill mono" id="clock">--:--:-- IST</span>
+      <span class="pill" style="color:var(--warn)">PAPER TRADING ONLY</span>
+    </div>
+    <div class="search">
+      <input id="search" placeholder="Search NSE stock (e.g. INFY, HDFC Bank)…" autocomplete="off">
+      <div class="results" id="search-results" hidden></div>
+    </div>
+    <button class="btn sm" id="theme-btn" title="Toggle light/dark">◐</button>
+  </header>
+  <nav class="tabs" id="tabs">
+    <a href="#/today" data-r="today">What should I do today?</a>
+    <a href="#/scanner" data-r="scanner">Scanner</a>
+    <a href="#/intraday" data-r="intraday">Intraday</a>
+    <a href="#/swing" data-r="swing">Swing</a>
+    <a href="#/longterm" data-r="longterm">Long-term</a>
+    <a href="#/news" data-r="news">News</a>
+    <a href="#/watchlist" data-r="watchlist">Watchlist &amp; Alerts <span id="alert-count"></span></a>
+    <a href="#/paper" data-r="paper">Paper trading</a>
+    <a href="#/settings" data-r="settings">Capital &amp; Risk</a>
+    <a href="#/status" data-r="status">Data status</a>
+  </nav>
+  <main id="app"><div class="loading"><span class="spinner"></span> Loading…</div></main>
+  <footer>
+    Not investment advice. Ratings are rules-based readings of delayed, unofficial data, not predictions. Day trading is risky
+    and most traders lose money. No real orders are ever placed by this application.<br>
+    Charts: <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView</a> Lightweight Charts™.
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
