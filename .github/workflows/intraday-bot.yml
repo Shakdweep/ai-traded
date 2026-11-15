@@ -1,0 +1,33 @@
+# The "Rs 5,000 intraday test" PAPER account (backend/bot/intraday.py). No real orders.
+# Runs every weekday from 09:25 IST until the 15:15 square-off; on non-test days it just logs and exits.
+# Uses the same DATABASE_URL repository secret as the research jobs.
+name: Intraday paper bot
+
+on:
+  schedule:
+    - cron: "55 3 * * 1-5"   # 09:25 IST Mon-Fri (GitHub may start a few minutes late)
+  workflow_dispatch:
+
+concurrency:
+  group: intraday-bot
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TRADER_DISABLE_BACKGROUND: "1"
+      TRADER_DATA_DIR: /tmp/aitraded-data
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements.txt -r requirements-hosted.txt
+      - name: Trade today's session (paper)
+        run: python -m backend.bot.intraday run
