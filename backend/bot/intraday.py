@@ -9,7 +9,9 @@ Rules (the same opening-range breakout plan the Intraday tab shows):
     0.15R past the plan's entry. Stop = opening-range midpoint; target = 2R.
   * One position at a time, at most 3 trades a day, the same stock not twice in a day,
     no new trades after a 2% loss on the day, entries 09:30-14:45, everything closed 15:15.
-  * Cash only (no leverage): it can buy only what the account's cash pays for.
+  * 5x intraday leverage (MIS-style): it may buy up to 5x its free cash, but the size is
+    still capped so the loss at the stop, incl. slippage and charges, is at most 1% of the
+    account. Margin used = position value / 5. Brokers' actual leverage varies by stock.
   * Exits on completed 5-min candles: stop first if a candle touches both (conservative),
     a gap below the stop fills at the candle's open.
   * Indian intraday charges on every trade (brokerage min(Rs 20, 0.03%), STT, exchange,
@@ -37,8 +39,8 @@ ACCOUNT = "intraday-5k"
 CONFIG = {
     "name": "₹5,000 intraday test", "capital": 5000.0, "start_date": "2026-11-16", "trading_days": 5,
     "universe": "nifty50", "risk_per_trade_pct": 1.0, "max_open": 1, "max_trades_per_day": 3,
-    "daily_loss_limit_pct": 2.0, "slippage_pct": 0.05, "chase_limit_r": 0.15,
-    "no_entry_before": "09:30", "no_entry_after": "14:45", "flat_by": "15:15", "leverage": "none (cash only)",
+    "daily_loss_limit_pct": 2.0, "slippage_pct": 0.05, "chase_limit_r": 0.15, "leverage": 5,
+    "no_entry_before": "09:30", "no_entry_after": "14:45", "flat_by": "15:15",
 }
 CYCLE_SECONDS = 300
 BAR_DELAY = 75           # wait this long after a 5-min candle closes before reading it (Yahoo delay)
@@ -51,6 +53,9 @@ def ensure_account():
          "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
          (ACCOUNT, CONFIG["name"], CONFIG["capital"], CONFIG["start_date"], CONFIG["trading_days"],
           json.dumps(CONFIG), time.time(), "scheduled"))
+    # rules can still change until the test starts; after that they're frozen with its history
+    db.x("UPDATE bot_accounts SET config=?, name=? WHERE id=? AND status='scheduled'",
+         (json.dumps(CONFIG), CONFIG["name"], ACCOUNT))
     return db.q("SELECT * FROM bot_accounts WHERE id=?", (ACCOUNT,), one=True)
 
 
@@ -77,15 +82,19 @@ def trades(day=None, status=None):
 
 
 def balances():
-    """cash = capital + realised net P&L - money tied up in open positions."""
+    """equity = capital + realised net P&L; margin = open position value / leverage;
+    cash = free margin (equity - margin); buying power = cash x leverage."""
     acct = ensure_account()
+    lev = float(json.loads(acct["config"] or "{}").get("leverage") or 1)
     closed = trades(status="closed")
     open_ = trades(status="open")
     realised = sum(t["net_pnl"] or 0 for t in closed)
     tied = sum(t["invested"] for t in open_)
-    return {"capital": acct["start_capital"], "realised": round(realised, 2),
-            "cash": round(acct["start_capital"] + realised - tied, 2), "tied": round(tied, 2),
-            "equity": round(acct["start_capital"] + realised, 2)}
+    equity = acct["start_capital"] + realised
+    cash = equity - tied / lev
+    return {"capital": acct["start_capital"], "realised": round(realised, 2), "cash": round(cash, 2),
+            "tied": round(tied, 2), "margin": round(tied / lev, 2), "leverage": lev,
+            "buying_power": round(cash * lev, 2), "equity": round(equity, 2)}
 
 
 def trading_days_of_test():
@@ -100,8 +109,11 @@ def trading_days_of_test():
 # ---------------------------------------------------------------- trading
 
 def bot_settings(cash, equity):
+    """Sizing limits: buying power = free cash x leverage; max loss at the stop = 1% of equity."""
+    lev = float(CONFIG.get("leverage") or 1)
     s = dict(db.DEFAULT_SETTINGS)
-    s.update(capital=equity, cash=cash, risk_per_trade_pct=CONFIG["risk_per_trade_pct"], max_position_pct=100.0,
+    s.update(capital=equity, cash=cash * lev, risk_per_trade_pct=CONFIG["risk_per_trade_pct"],
+             max_position_pct=100.0 * lev,
              slippage_pct=CONFIG["slippage_pct"], intraday_flat_by=CONFIG["flat_by"],
              intraday_no_entry_before=CONFIG["no_entry_before"], intraday_no_entry_after=CONFIG["no_entry_after"])
     return s
@@ -202,8 +214,10 @@ def try_entry(now):
                           "confidence": r.get("confidence"), "or_high": r.get("or_high"), "entry_plan": p["entry"],
                           "reasons": p.get("reasoning"), "decided_by": size.get("decided_by"),
                           "max_loss": size.get("max_loss")})))
-        log("buy", "BOUGHT %d %s @ ₹%.2f = ₹%.2f invested (stop ₹%.2f, target ₹%.2f, %s). Cash left ₹%.2f" % (
-            qty, r["symbol"], fill, invested, p["stop"], p["target1"], p.get("setup"), b["cash"] - invested),
+        lev = float(CONFIG.get("leverage") or 1)
+        log("buy", "BOUGHT %d %s @ ₹%.2f = ₹%.2f position (margin ₹%.2f at %gx; stop ₹%.2f, target ₹%.2f; max loss "
+            "≈ ₹%.2f). Free cash left ₹%.2f" % (qty, r["symbol"], fill, invested, invested / lev, lev, p["stop"],
+                                                p["target1"], size.get("max_loss") or 0, b["cash"] - invested / lev),
             {"plan": {k: p.get(k) for k in ("entry", "stop", "target1", "reward_risk", "setup")}}, r["symbol"])
         return
 
@@ -263,7 +277,8 @@ def run(now_fn=None):
     close_stale(today)
     start_day(today)
     log("start", "Day %d of %d. Balance ₹%.2f. Rules: %s" % (days.index(today) + 1, len(days), balances()["equity"],
-        "ORB on NIFTY 50, 1 position, max 3 trades, stop at 2% day loss, entries 09:30-14:45, flat 15:15, no leverage"))
+        "ORB on NIFTY 50, 1 position, max 3 trades, 1%% max loss per trade, stop at 2%% day loss, entries "
+        "09:30-14:45, flat 15:15, %gx leverage" % CONFIG["leverage"]))
     entry_from, entry_to, flat = _hhmm(CONFIG["no_entry_before"]), _hhmm(CONFIG["no_entry_after"]), _hhmm(CONFIG["flat_by"])
     last_beat = 0
     while True:

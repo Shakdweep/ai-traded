@@ -1007,7 +1007,10 @@ class TestIntradayBot(unittest.TestCase):
         # sized by the app's own risk engine: Rs 50 max loss at the stop INCLUDING slippage and charges
         expect = rk.size_position(100.05, 99.0, b.bot_settings(5000.0, 5000.0), target=102.0, product="intraday")
         self.assertEqual(t["qty"], expect["qty"])
-        self.assertLessEqual(expect["max_loss"], 50.0)
+        self.assertLessEqual(expect["max_loss"], 50.0)  # 5x buying power never lifts the 1% loss cap
+        self.assertEqual(b.bot_settings(5000.0, 5000.0)["cash"], 25000.0)
+        bal = b.balances()
+        self.assertEqual((bal["leverage"], bal["buying_power"]), (5.0, round(bal["cash"] * 5, 2)))
         self.assertAlmostEqual(t["invested"], round(t["qty"] * 100.05, 2))
         self.assertGreaterEqual(cal.to_ist(t["entry_time"]).time(), datetime.time(10, 0))
         self.assertAlmostEqual(t["exit_price"], round(102 * (1 - 0.0005), 2))

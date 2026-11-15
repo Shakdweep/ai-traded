@@ -891,22 +891,23 @@ function renderBot(r) {
       <div class="muted small" style="margin-top:6px">A paper account that trades the Intraday tab's opening-range breakout on NIFTY 50 by itself,
         ${r.test_days.length} trading days from ${dayName(r.test_days[0])} to ${dayName(r.test_days[r.test_days.length - 1])}.
         One position at a time · max ${cfg.max_trades_per_day} trades a day · stops for the day after a ${cfg.daily_loss_limit_pct}% loss ·
-        entries ${cfg.no_entry_before}–${cfg.no_entry_after} · everything closed by ${cfg.flat_by} · ${esc(cfg.leverage)} · real Indian intraday charges.</div></div></div>
+        entries ${cfg.no_entry_before}–${cfg.no_entry_after} · everything closed by ${cfg.flat_by} ·
+        <b>${cfg.leverage || 1}x buying power</b> (up to ${inr((a.start_capital || 0) * (cfg.leverage || 1), 0)}), but each trade's loss at the stop is capped at ${cfg.risk_per_trade_pct}% incl. charges · real Indian intraday charges.</div></div></div>
     <div class="acc-grid" style="margin-top:16px">
       <div class="acc-card"><div class="dim small">Balance now</div><div class="acc-big">${inr(b.equity, 2)}</div><div class="small muted">started with ${inr(a.start_capital, 0)}</div></div>
       <div class="acc-card"><div class="dim small">Return</div><div class="acc-big ${cls(r.return_pct)}">${pct(r.return_pct)}</div><div class="small muted">net ${inr(t.net, 2)} after charges</div></div>
       <div class="acc-card"><div class="dim small">Before charges</div><div class="acc-big ${cls(t.gross)}">${inr(t.gross, 2)}</div><div class="small muted">charges paid ${inr(t.charges, 2)}</div></div>
       <div class="acc-card"><div class="dim small">Trades</div><div class="acc-big">${t.closed}</div><div class="small muted">${t.wins} profitable · ${t.trades - t.closed} open now</div></div>
-      <div class="acc-card"><div class="dim small">Cash free</div><div class="acc-big">${inr(b.cash, 2)}</div><div class="small muted">${b.tied ? inr(b.tied, 2) + " in an open trade" : "no open trade"}</div></div>
+      <div class="acc-card"><div class="dim small">Free cash</div><div class="acc-big">${inr(b.cash, 2)}</div><div class="small muted">${b.tied ? `${inr(b.tied, 2)} position · ${inr(b.margin, 2)} margin used` : `buying power ${inr(b.buying_power, 0)}`}</div></div>
     </div>
     <h4 class="acc-h">Day by day</h4>
     <div class="tablewrap"><table class="plain"><thead><tr><th>Day</th><th class="n">Started with</th><th class="n">Trades</th><th class="n">Invested</th>
       <th class="n">Got back</th><th class="n">Charges</th><th class="n">Net P&amp;L</th><th class="n">Ended with</th></tr></thead><tbody>${dayRows}</tbody></table></div>
     <h4 class="acc-h">Every trade</h4>
     ${r.trades.length ? `<div class="tablewrap"><table class="plain"><thead><tr><th>Day</th><th>Stock</th><th class="n">Shares</th><th>Bought</th><th class="n">Buy price</th>
-      <th class="n">Invested</th><th class="n">Stop / target</th><th>Sold</th><th class="n">Sell price</th><th class="n">Got back</th><th>Why sold</th><th class="n">Charges</th><th class="n">Net P&amp;L</th></tr></thead><tbody>
+      <th class="n">Position</th><th class="n">Stop / target</th><th>Sold</th><th class="n">Sell price</th><th class="n">Got back</th><th>Why sold</th><th class="n">Charges</th><th class="n">Net P&amp;L</th></tr></thead><tbody>
       ${r.trades.map((x) => `<tr><td class="small">${dayName(x.day)}</td><td><b>${esc(x.symbol)}</b><div class="dim small">${esc(x.signal.rating || "")}</div></td>
-        <td class="n">${x.qty}</td><td class="small">${tm(x.entry_time)}</td><td class="n">${fmt(x.entry_price)}</td><td class="n">${inr(x.invested, 2)}</td>
+        <td class="n">${x.qty}</td><td class="small">${tm(x.entry_time)}</td><td class="n">${fmt(x.entry_price)}</td><td class="n">${inr(x.invested, 2)}<div class="dim small">margin ${inr(x.invested / (cfg.leverage || 1), 2)}</div></td>
         <td class="n small">${fmt(x.stop)} / ${fmt(x.target)}</td>
         <td class="small">${x.status === "open" ? '<span class="exit-pill d-INFO">open</span>' : tm(x.exit_time)}</td>
         <td class="n">${x.exit_price == null ? "–" : fmt(x.exit_price)}</td><td class="n">${x.received == null ? "–" : inr(x.received, 2)}</td>
