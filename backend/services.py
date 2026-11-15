@@ -97,10 +97,12 @@ def run_scan(key="nifty100", mode="swing", symbols=None):
             except Exception as e:  # noqa: BLE001 - one bad series never sinks the scan
                 errors[ys] = "analysis failed: %s" % str(e)[:120]
         now = time.time()
-        db.xmany("INSERT INTO signals(ts, symbol, mode, rating, score, confidence, price, setups, data_ts) "
-                 "VALUES(?,?,?,?,?,?,?,?,?)",
+        db.xmany("INSERT INTO signals(ts, symbol, mode, rating, score, confidence, price, setups, data_ts, "
+                 "entry, stop, target1, target2) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  [(now, r["symbol"], mode, r["rating"], r["score"], r["confidence"], r["price"],
-                   ",".join(r["setups"]), now) for r in rows if r["rating"] != "INSUFFICIENT DATA"])
+                   ",".join(r["setups"]), now) + tuple((r.get("plan") or {}).get(k) for k in
+                                                       ("entry", "stop", "target1", "target2"))
+                  for r in rows if r["rating"] != "INSUFFICIENT DATA"])
         db.x("DELETE FROM signals WHERE ts < ?", (now - SIGNAL_KEEP_DAYS * 86400,))  # keep the history small
         res = {"universe": key, "title": title, "mode": mode, "rows": rows, "errors": errors,
                "scanned": len(stocks), "analysed": len(rows), "started": t0, "finished": time.time(),

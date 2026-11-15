@@ -280,6 +280,12 @@ async def admin_accuracy(request: Request, refresh: int = 0):
     return admin.accuracy(force=bool(refresh))
 
 
+@app.get("/api/admin/predictions")
+async def admin_predictions(request: Request, refresh: int = 0):
+    _require_owner(request)
+    return admin.predictions(force=bool(refresh))
+
+
 @app.post("/api/admin/approve")
 async def admin_approve(request: Request, body: dict = Body(...)):
     _require_owner(request)

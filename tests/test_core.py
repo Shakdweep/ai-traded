@@ -711,3 +711,90 @@ class TestAdminAccuracy(unittest.TestCase):
         self.assertEqual(swing5["rows"][0]["rating"], "BULLISH")
         expect_up = bars[45]["c"] > d0["c"]
         self.assertEqual(swing5["direction"]["hit_pct"], 100.0 if expect_up else 0.0)
+
+
+class TestPredictionOutcomes(unittest.TestCase):
+    """Did each prediction come true? Target before stop, direction after N days, intraday by the close."""
+
+    def setUp(self):
+        from backend import admin
+        self.admin = admin
+        self.t0 = int(datetime.datetime(2026, 3, 2, 15, 0, tzinfo=cal.IST).timestamp())  # a Monday afternoon
+
+    def days(self, highs_lows_closes):
+        """Daily bars on the sessions AFTER the call (call day first)."""
+        out = [{"t": self.t0 - 5 * 3600, "o": 100, "h": 101, "l": 99, "c": 100, "v": 1}]
+        for i, (h, l, c) in enumerate(highs_lows_closes):
+            out.append({"t": self.t0 - 5 * 3600 + (i + 1) * 86400, "o": c, "h": h, "l": l, "c": c, "v": 1})
+        return out
+
+    def call(self, rating="BULLISH", target=110.0, stop=95.0, mode="swing", ts=None):
+        return {"ts": ts or self.t0, "symbol": "AAA", "mode": mode, "rating": rating, "price": 100.0,
+                "target1": target, "stop": stop}
+
+    def test_target_first_is_met(self):
+        r = self.admin.judge(self.call(), self.days([(104, 99, 103), (111, 102, 109)]))
+        self.assertEqual((r["outcome"], r["days"], r["kind"]), ("met", 2, "target/stop"))
+        self.assertIn("Target", r["text"])
+
+    def test_stop_first_is_missed_and_same_day_counts_stop(self):
+        self.assertEqual(self.admin.judge(self.call(), self.days([(102, 94, 96)]))["outcome"], "missed")
+        self.assertEqual(self.admin.judge(self.call(), self.days([(112, 94, 100)]))["outcome"], "missed")
+
+    def test_open_then_expired(self):
+        r = self.admin.judge(self.call(), self.days([(103, 98, 101)] * 3))
+        self.assertEqual((r["outcome"], r["days"]), ("open", 3))
+        r = self.admin.judge(self.call(), self.days([(103, 98, 102)] * 25))
+        self.assertEqual((r["outcome"], r["days"]), ("expired", 20))
+        self.assertEqual(r["move_pct"], 2.0)
+
+    def test_direction_calls(self):
+        no_plan = self.call(target=None, stop=None)
+        self.assertEqual(self.admin.judge(no_plan, self.days([(101, 99, 100)] * 4 + [(104, 100, 103)]))["outcome"], "met")
+        bear = self.call(rating="AVOID")
+        r = self.admin.judge(bear, self.days([(101, 95, 96)] * 5))
+        self.assertEqual((r["outcome"], r["kind"]), ("met", "direction"))
+        self.assertEqual(self.admin.judge(bear, self.days([(105, 99, 104)] * 5))["outcome"], "missed")
+        self.assertEqual(self.admin.judge(self.call(rating="WAIT"), self.days([]))["outcome"], "none")
+
+    def test_intraday_uses_bars_after_the_call(self):
+        ts = int(datetime.datetime(2026, 3, 2, 10, 0, tzinfo=cal.IST).timestamp())
+        five = [{"t": ts - 600, "o": 100, "h": 120, "l": 80, "c": 100, "v": 1},   # before the call: ignored
+                {"t": ts + 300, "o": 100, "h": 101, "l": 99.5, "c": 100.5, "v": 1},
+                {"t": ts + 600, "o": 100.5, "h": 102.2, "l": 100, "c": 102, "v": 1}]
+        c = self.call(mode="intraday", target=102.0, stop=98.0, ts=ts)
+        r = self.admin.judge(c, None, five)
+        self.assertEqual(r["outcome"], "met")
+        self.assertIn("10:10", r["text"])
+        c = self.call(mode="intraday", target=105.0, stop=98.0, ts=ts)
+        self.assertEqual(self.admin.judge(c, None, five)["outcome"], "expired")  # a past day, neither hit
+
+    def test_summary_and_saved_plans(self):
+        items = [{"segment": "swing", "rating": "BULLISH", "outcome": o} for o in ("met", "met", "missed", "open")]
+        items.append({"segment": "swing", "rating": "WAIT", "outcome": "none"})
+        s = self.admin.summarize(items)
+        self.assertEqual((s["swing"]["met"], s["swing"]["finished"], s["swing"]["met_pct"]), (2, 3, 66.7))
+        self.assertNotIn("swing|WAIT", s)
+        db.db()
+        db.x("DELETE FROM signals")
+        db.x("INSERT INTO signals(ts, symbol, mode, rating, price, entry, stop, target1, target2) "
+             "VALUES(?,?,?,?,?,?,?,?,?)", (self.t0, "AAA", "swing", "BULLISH", 100, 100, 95, 110, 115))
+        db.x("INSERT INTO signals(ts, symbol, mode, rating, price) VALUES(?,?,?,?,?)",
+             (self.t0 + 600, "AAA", "swing", "BEARISH", 101))  # later the same day: not the first call
+        first = list(self.admin._first_calls().values())
+        self.assertEqual(len(first), 1)
+        self.assertEqual((first[0]["rating"], first[0]["target1"]), ("BULLISH", 110))
+
+    def test_breakout_plans_wait_for_their_entry(self):
+        c = self.call(target=110.0, stop=95.0)
+        c["entry"] = 104.0
+        # dips to 94 BEFORE the entry triggers: not a miss; then triggers at 104 and reaches 110
+        r = self.admin.judge(c, self.days([(102, 94, 100), (105, 101, 104), (111, 103, 110)]))
+        self.assertEqual((r["outcome"], r["days"]), ("met", 3))
+        r = self.admin.judge(c, self.days([(102, 99, 101)] * 4))
+        self.assertEqual(r["outcome"], "open")
+        self.assertIn("for entry", r["text"])
+        r = self.admin.judge(c, self.days([(102, 99, 101)] * 22))
+        self.assertEqual(r["outcome"], "not_triggered")
+        s = self.admin.summarize([dict(r, segment="swing")])
+        self.assertEqual((s["swing"]["not_triggered"], s["swing"]["finished"]), (1, 0))

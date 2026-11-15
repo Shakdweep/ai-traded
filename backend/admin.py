@@ -195,6 +195,164 @@ def _prev(dates, d):
     return prior[-1] if prior else None
 
 
+# ---------------------------------------------------------------- predictions: did each one come true?
+
+SWING_WINDOW = 20      # trading days a swing target/stop prediction has to play out
+DIRECTION_DAYS = 5     # trading days for predictions without a target and stop
+
+
+def _first_calls():
+    """First call per stock, segment and IST day (scans repeat every few minutes)."""
+    first = {}
+    for r in db.q("SELECT * FROM signals ORDER BY ts"):
+        first.setdefault((r["symbol"], r["mode"], cal.to_ist(r["ts"]).date()), r)
+    return first
+
+
+def judge(call, daily_bars, bars5=None, now=None):
+    """One prediction -> outcome dict. outcome: met | missed | expired | open | not_triggered | none.
+    Breakout plans (entry above the price at the time of the call) only count once the price
+    reaches the entry; a plan whose entry never triggers is "not_triggered", not a miss."""
+    now = now or time.time()
+    d = cal.to_ist(call["ts"]).date()
+    rating, price = call["rating"], call["price"]
+    base = {"ts": call["ts"], "date": str(d), "symbol": call["symbol"], "segment": call["mode"], "rating": rating,
+            "price": price, "target": call.get("target1"), "stop": call.get("stop")}
+    if rating not in BULL and rating not in BEAR or not price:
+        return dict(base, kind="none", outcome="none", text="No up/down prediction")
+    entry = call.get("entry") if call.get("entry") and call["entry"] > price * 1.001 else None
+    with_plan = rating in BULL and call.get("target1") and call.get("stop") and call["stop"] < price < call["target1"] \
+        and (entry is None or entry < call["target1"])
+    base["entry"] = entry
+    if call["mode"] == "intraday":
+        bars = [b for b in (bars5 or []) if b["t"] >= call["ts"] and cal.to_ist(b["t"]).date() == d]
+        closed_day = d < cal.now_ist().date() or not cal.market_status()["open"] and d == cal.now_ist().date()
+        if with_plan:
+            live = entry is None
+            for b in bars:
+                if not live:
+                    if b["h"] < entry:
+                        continue
+                    live = True
+                hit_t, hit_s = b["h"] >= call["target1"], b["l"] <= call["stop"]
+                if hit_s:  # if both in one 5-minute bar, count the stop (conservative)
+                    return dict(base, kind="target/stop", outcome="missed", move_pct=_pct(call["stop"], price),
+                                text="Stop ₹%.2f hit at %s" % (call["stop"], cal.to_ist(b["t"]).strftime("%H:%M")))
+                if hit_t:
+                    return dict(base, kind="target/stop", outcome="met", move_pct=_pct(call["target1"], price),
+                                text="Target ₹%.2f hit at %s" % (call["target1"], cal.to_ist(b["t"]).strftime("%H:%M")))
+        if not bars or not closed_day:
+            return dict(base, kind="target/stop" if with_plan else "direction", outcome="open",
+                        text="Waiting for today's close")
+        move = _pct(bars[-1]["c"], price)
+        if with_plan and entry and max(b["h"] for b in bars) < entry:
+            return dict(base, kind="target/stop", outcome="not_triggered", move_pct=move,
+                        text="Entry ₹%.2f never reached today" % entry)
+        if with_plan:
+            return dict(base, kind="target/stop", outcome="expired", move_pct=move,
+                        text="Neither hit by the close (%+.2f%%)" % move)
+        ok = move > 0 if rating in BULL else move < 0
+        return dict(base, kind="direction", outcome="met" if ok else "missed", move_pct=move,
+                    text="%s %.2f%% by the close" % ("Up" if move > 0 else "Down", abs(move)))
+
+    completed, _ = engine.completed_daily(daily_bars or [])
+    after = [b for b in completed if cal.to_ist(b["t"]).date() > d]  # sessions AFTER the call
+    if with_plan:
+        live = entry is None
+        for i, b in enumerate(after[:SWING_WINDOW]):
+            when = cal.to_ist(b["t"]).strftime("%d %b")
+            if not live:
+                if b["h"] < entry:
+                    continue
+                live = True  # entry reached: from this day the target and stop count
+            if b["l"] <= call["stop"]:  # if both in one day, count the stop (conservative)
+                return dict(base, kind="target/stop", outcome="missed", days=i + 1, move_pct=_pct(call["stop"], price),
+                            text="Stop ₹%.2f hit on %s (day %d)" % (call["stop"], when, i + 1))
+            if b["h"] >= call["target1"]:
+                return dict(base, kind="target/stop", outcome="met", days=i + 1, move_pct=_pct(call["target1"], price),
+                            text="Target ₹%.2f hit on %s (day %d)" % (call["target1"], when, i + 1))
+        if len(after) < SWING_WINDOW:
+            move = _pct(after[-1]["c"], price) if after else None
+            waiting = " for entry ₹%.2f" % entry if not live else ", neither hit yet"
+            return dict(base, kind="target/stop", outcome="open", days=len(after), move_pct=move,
+                        text="Day %d of %d%s%s" % (len(after), SWING_WINDOW, waiting,
+                                                   " (%+.2f%%)" % move if move is not None else ""))
+        move = _pct(after[SWING_WINDOW - 1]["c"], price)
+        if not live:
+            return dict(base, kind="target/stop", outcome="not_triggered", days=SWING_WINDOW, move_pct=move,
+                        text="Entry ₹%.2f never reached in %d trading days (%+.2f%%)" % (entry, SWING_WINDOW, move))
+        return dict(base, kind="target/stop", outcome="expired", days=SWING_WINDOW, move_pct=move,
+                    text="Neither hit in %d trading days (%+.2f%%)" % (SWING_WINDOW, move))
+    if len(after) < DIRECTION_DAYS:
+        move = _pct(after[-1]["c"], price) if after else None
+        return dict(base, kind="direction", outcome="open", days=len(after), move_pct=move,
+                    text="Day %d of %d%s" % (len(after), DIRECTION_DAYS, " (%+.2f%%)" % move if move is not None else ""))
+    move = _pct(after[DIRECTION_DAYS - 1]["c"], price)
+    ok = move > 0 if rating in BULL else move < 0
+    return dict(base, kind="direction", outcome="met" if ok else "missed", days=DIRECTION_DAYS, move_pct=move,
+                text="%s %.2f%% after %d trading days" % ("Up" if move > 0 else "Down", abs(move), DIRECTION_DAYS))
+
+
+def _pct(a, b):
+    return round((a / b - 1) * 100, 2) if a and b else None
+
+
+def summarize(items):
+    """Counts per segment and rating: met / missed / expired / open, and the success rate of finished ones."""
+    out = {}
+    for it in items:
+        if it["outcome"] == "none":
+            continue
+        for key in (it["segment"], "%s|%s" % (it["segment"], it["rating"])):
+            s = out.setdefault(key, {"met": 0, "missed": 0, "expired": 0, "open": 0, "not_triggered": 0})
+            s[it["outcome"]] += 1
+    for s in out.values():
+        done = s["met"] + s["missed"] + s["expired"]
+        s["finished"] = done
+        s["met_pct"] = round(100 * s["met"] / done, 1) if done else None
+    return out
+
+
+def _compute_predictions():
+    calls = list(_first_calls().values())
+    syms = sorted({c["symbol"] for c in calls})
+    daily, _ = yahoo.charts([yahoo.to_yahoo(s) for s in syms], "6mo", "1d")
+    intra_syms = sorted({c["symbol"] for c in calls if c["mode"] == "intraday"})
+    five, _ = yahoo.charts([yahoo.to_yahoo(s) for s in intra_syms], "60d", "5m") if intra_syms else ({}, {})
+    items = []
+    for c in calls:
+        ys = yahoo.to_yahoo(c["symbol"])
+        items.append(judge(c, (daily.get(ys) or {}).get("bars"), (five.get(ys) or {}).get("bars")))
+    items.sort(key=lambda x: x["ts"], reverse=True)
+    real = [i for i in items if i["outcome"] != "none"]
+    return {"summary": summarize(items), "items": real[:500], "total": len(real),
+            "no_prediction": len(items) - len(real), "swing_window": SWING_WINDOW, "direction_days": DIRECTION_DAYS,
+            "computed_at": time.time(), "computed_ist": cal.now_ist().strftime("%d %b %Y %H:%M IST")}
+
+
+_pred = {"status": "idle", "result": None, "started": None, "finished": None, "error": None}
+
+
+def _run_pred():
+    try:
+        res = _compute_predictions()
+        with _acc_lock:
+            _pred.update(status="done", result=res, finished=time.time(), error=None)
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        with _acc_lock:
+            _pred.update(status="error", error="%s: %s" % (type(e).__name__, str(e)[:200]), finished=time.time())
+
+
+def predictions(force=False):
+    with _acc_lock:
+        stale = not _pred["result"] or time.time() - (_pred["finished"] or 0) > 30 * 60
+        if _pred["status"] != "running" and (force or stale):
+            _pred.update(status="running", started=time.time(), error=None)
+            threading.Thread(target=_run_pred, daemon=True, name="predictions").start()
+        return {k: _pred[k] for k in ("status", "result", "started", "finished", "error")}
+
+
 # ---------------------------------------------------------------- background job
 
 def _compute():

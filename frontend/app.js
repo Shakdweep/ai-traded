@@ -728,6 +728,78 @@ async function viewStatus() {
     <div class="card"><h3>Recent errors</h3>${Object.entries(pr.prices.recent_errors).map(([k, v]) => `<div class="small"><b>${esc(k)}</b> ${esc(v.error)} <span class="dim">${ago(v.ts)}</span></div>`).join("") + s.background.errors.map((e) => `<div class="small"><b>${esc(e.where)}</b> ${esc(e.error)} <span class="dim">${ago(e.ts)}</span></div>`).join("") || '<div class="dim small">None.</div>'}</div></div>`;
 }
 
+// ------------------------------------------------------------------ predictions: did they come true? (owner)
+const OUTCOME = { met: ["d-TRADE", "✅ Met"], missed: ["d-NO", "❌ Missed"], expired: ["d-WAIT", "⌛ Expired"], open: ["d-INFO", "⏳ Open"],
+  not_triggered: ["r-na", "➖ Not triggered"] };
+const predState = { seg: "all", out: "all", rating: "all" };
+
+function renderPredictions(pr) {
+  const area = $("#pred-area");
+  if (!area) return;
+  const my = state.route, r = pr.result;
+  const head = `<div class="row between"><div><h3 style="margin:0">Predictions: did they come true?</h3>
+      <div class="muted small" style="margin-top:6px">Each stock's first call of the day.
+        <b>Bullish with a plan:</b> ✅ met if Target 1 was hit before the stop, ❌ missed if the stop came first, ⌛ expired if neither
+        within ${r ? r.swing_window : 20} trading days (swing) or by the close (intraday).
+        Breakout plans count only once the price reaches their entry (➖ not triggered otherwise, left out of the success rate).
+        <b>Other bullish and bearish calls:</b> right or wrong on direction after ${r ? r.direction_days : 5} trading days (intraday: by the close).
+        WAIT and HIGH RISK make no prediction, so they're left out.</div></div>
+      <div class="row">${pr.status === "running" ? '<span class="small muted"><span class="spinner"></span> Checking prices…</span>'
+        : `<span class="dim small">${r ? "Updated " + esc(r.computed_ist) : ""}</span><button class="btn sm" id="pred-refresh">Refresh</button>`}</div></div>
+      ${pr.error ? `<div class="small down" style="margin-top:10px">Last check failed: ${esc(pr.error)}</div>` : ""}`;
+  if (!r) {
+    area.innerHTML = `<div class="card spanall">${head}</div>`;
+  } else {
+    const seg = (k) => r.summary[k];
+    const card = (k, label) => {
+      const s = seg(k);
+      if (!s) return `<div class="acc-card"><div class="dim small">${label}</div><div class="acc-big">–</div><div class="small muted">no predictions yet</div></div>`;
+      return `<div class="acc-card"><div class="dim small">${label}</div>
+        <div class="acc-big">${s.met_pct == null ? "–" : fmt(s.met_pct, 1) + "%"}</div>
+        <div class="small muted">came true, of ${s.finished} finished</div>
+        <div class="pred-counts"><span class="up">✅ ${s.met}</span><span class="down">❌ ${s.missed}</span><span>⌛ ${s.expired}</span><span class="dim">⏳ ${s.open} open</span>${s.not_triggered ? `<span class="dim">➖ ${s.not_triggered}</span>` : ""}</div></div>`;
+    };
+    const ratings = ["STRONG BULLISH", "BULLISH", "BEARISH", "AVOID"];
+    const byRating = (segKey) => ratings.map((rt) => {
+      const s = seg(segKey + "|" + rt);
+      return s ? `<tr><td>${ratingBadge(rt)}</td><td class="n">${s.met}</td><td class="n">${s.missed}</td><td class="n">${s.expired}</td>
+        <td class="n">${s.open}</td><td class="n"><b>${s.met_pct == null ? "–" : fmt(s.met_pct, 1) + "%"}</b></td></tr>` : "";
+    }).join("");
+    const segTable = (segKey, label) => { const rows = byRating(segKey); return rows ? `<h4 class="acc-h">${label}</h4><div class="tablewrap"><table class="plain">
+      <thead><tr><th>Rating</th><th class="n">✅ Met</th><th class="n">❌ Missed</th><th class="n">⌛ Expired</th><th class="n">⏳ Open</th><th class="n">Came true</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : ""; };
+    const items = r.items.filter((i) => (predState.seg === "all" || i.segment === predState.seg) &&
+      (predState.out === "all" || i.outcome === predState.out) && (predState.rating === "all" || i.rating === predState.rating));
+    const sel = (id, val, opts) => `<select id="${id}">${opts.map(([v, t]) => `<option value="${v}"${v === val ? " selected" : ""}>${t}</option>`).join("")}</select>`;
+    area.innerHTML = `<div class="card spanall">${head}
+      <div class="acc-grid" style="margin-top:18px">${card("swing", "Swing predictions")}${card("intraday", "Intraday predictions")}</div>
+      ${segTable("swing", "Swing, by rating")}${segTable("intraday", "Intraday, by rating")}
+      <div class="row" style="margin:24px 0 12px;align-items:flex-end">
+        <label class="f">Segment ${sel("pf-seg", predState.seg, [["all", "All"], ["swing", "Swing"], ["intraday", "Intraday"]])}</label>
+        <label class="f">Result ${sel("pf-out", predState.out, [["all", "All"], ["met", "✅ Met"], ["missed", "❌ Missed"], ["expired", "⌛ Expired"], ["open", "⏳ Open"], ["not_triggered", "➖ Not triggered"]])}</label>
+        <label class="f">Rating ${sel("pf-rating", predState.rating, [["all", "All"]].concat(ratings.map((x) => [x, x])))}</label>
+        <span class="dim small">${items.length} shown${r.total > r.items.length ? ` (latest ${r.items.length} of ${r.total})` : ""}</span>
+      </div>
+      ${items.length ? `<div class="tablewrap" style="max-height:620px"><table class="plain"><thead><tr><th>Date</th><th>Stock</th><th>Segment</th><th>Rating</th>
+        <th class="n">Price then</th><th class="n">Target</th><th class="n">Stop</th><th>Result</th><th class="n">Move</th></tr></thead><tbody>
+        ${items.map((i) => `<tr><td class="small">${esc(i.date)}</td><td><a href="#/stock/${esc(i.symbol)}"><b>${esc(i.symbol)}</b></a></td>
+          <td class="small">${esc(i.segment)}</td><td>${ratingBadge(i.rating)}</td><td class="n">${fmt(i.price)}</td>
+          <td class="n">${i.kind === "target/stop" ? fmt(i.target) + (i.entry ? `<div class="dim small">entry ${fmt(i.entry)}</div>` : "") : '<span class="dim">–</span>'}</td>
+          <td class="n">${i.kind === "target/stop" ? fmt(i.stop) : '<span class="dim">–</span>'}</td>
+          <td><span class="exit-pill ${OUTCOME[i.outcome][0]}">${OUTCOME[i.outcome][1]}</span> <span class="small muted">${esc(i.text)}</span></td>
+          <td class="n ${cls(i.move_pct)}">${i.move_pct == null ? "–" : pct(i.move_pct)}</td></tr>`).join("")}
+        </tbody></table></div>` : '<div class="empty">No predictions match these filters.</div>'}
+    </div>`;
+    ["pf-seg", "pf-out", "pf-rating"].forEach((id) => $("#" + id).onchange = () => {
+      predState.seg = $("#pf-seg").value; predState.out = $("#pf-out").value; predState.rating = $("#pf-rating").value;
+      renderPredictions(pr);
+    });
+  }
+  const btn = $("#pred-refresh");
+  if (btn) btn.onclick = async () => renderPredictions(await api("/admin/predictions?refresh=1"));
+  if (pr.status === "running") setTimeout(async () => { if (my === state.route && $("#pred-area")) renderPredictions(await api("/admin/predictions")); }, 5000);
+}
+
 // ------------------------------------------------------------------ admin panel (owner only)
 function verdictOf(seg, minSample) {
   const d = seg.direction || {};
@@ -770,7 +842,7 @@ function ratingBadge(r) {
 async function viewAdmin() {
   const my = state.route;
   app.innerHTML = `<div class="loading"><span class="spinner"></span> Loading admin panel…</div>`;
-  const [o, acc] = await Promise.all([api("/admin/overview"), api("/admin/accuracy")]);
+  const [o, acc, pr] = await Promise.all([api("/admin/overview"), api("/admin/accuracy"), api("/admin/predictions")]);
   if (my !== state.route) return;
   const k = o.kpis, h = o.health;
   const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "–";
@@ -785,6 +857,8 @@ async function viewAdmin() {
       ${kpi("Joined (7 days)", k.joined_7d, `invites: ${k.invites_used} used, ${k.invites_unused} unused`)}
       ${kpi("Paper trades", k.closed_trades + " closed", `${k.open_positions} open · ${k.paper_orders} orders`)}
     </div>
+
+    <div id="pred-area"></div>
 
     <div id="acc-area"></div>
 
@@ -826,6 +900,7 @@ async function viewAdmin() {
         ${h.background_errors.length ? `<div class="small down" style="margin-top:12px">${h.background_errors.map((e) => `${esc(e.where)}: ${esc(e.error)} (${ago(e.ts)})`).join("<br>")}</div>` : '<div class="small up" style="margin-top:12px">No background errors.</div>'}
       </div>
     </div></div>`;
+  renderPredictions(pr);
   renderAccuracy(acc);
 }
 
