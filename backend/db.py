@@ -25,7 +25,8 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 USING_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
 # tables whose INSERTs return the new row id
-_ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal", "email_codes", "invites"}
+_ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal", "email_codes", "invites",
+              "data_runs", "cohorts", "predictions"}
 
 # Whose data a request (or a background step) works on: the signed-in account id, or ""
 # on your own PC where there is no login. Set once per request by the login middleware.
@@ -88,6 +89,31 @@ CREATE TABLE IF NOT EXISTS user_settings (
 CREATE TABLE IF NOT EXISTS user_watchlist (
   owner TEXT NOT NULL, symbol TEXT NOT NULL, added_at REAL NOT NULL, note TEXT DEFAULT '', mode TEXT DEFAULT 'swing',
   PRIMARY KEY (owner, symbol));
+CREATE TABLE IF NOT EXISTS daily_prices (
+  symbol TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL NOT NULL, prev_close REAL,
+  volume REAL, deliv_qty REAL, deliv_pct REAL, source TEXT NOT NULL, PRIMARY KEY (symbol, date));
+CREATE INDEX IF NOT EXISTS daily_prices_date ON daily_prices(date);
+CREATE TABLE IF NOT EXISTS bulk_deals (
+  date TEXT NOT NULL, symbol TEXT NOT NULL, client TEXT NOT NULL, side TEXT NOT NULL, qty REAL, price REAL,
+  PRIMARY KEY (date, symbol, client, side, qty, price));
+CREATE TABLE IF NOT EXISTS data_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, started_at REAL, finished_at REAL, status TEXT,
+  rows INTEGER, message TEXT);
+CREATE TABLE IF NOT EXISTS model_versions (
+  version TEXT PRIMARY KEY, created_at REAL NOT NULL, description TEXT, params TEXT, status TEXT);
+CREATE TABLE IF NOT EXISTS cohorts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, week_of TEXT NOT NULL, as_of TEXT NOT NULL, kind TEXT NOT NULL,
+  model_version TEXT NOT NULL, universe TEXT, scored INTEGER, created_at REAL NOT NULL, notes TEXT,
+  UNIQUE (week_of, kind, model_version));
+CREATE TABLE IF NOT EXISTS predictions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, cohort_id INTEGER NOT NULL, symbol TEXT NOT NULL, as_of TEXT NOT NULL,
+  model_version TEXT NOT NULL, kind TEXT NOT NULL, created_at REAL NOT NULL, payload TEXT NOT NULL, hash TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS predictions_cohort ON predictions(cohort_id);
+CREATE TABLE IF NOT EXISTS outcomes (
+  prediction_id INTEGER NOT NULL, horizon INTEGER NOT NULL, eval_date TEXT, actual_close REAL, actual_ret_pct REAL,
+  window_high REAL, window_low REAL, predicted_dir TEXT, actual_dir TEXT, dir_correct INTEGER, in_range INTEGER,
+  abs_err REAL, pct_err REAL, support_held INTEGER, resistance_broken INTEGER, stop_hit INTEGER, nifty_ret_pct REAL,
+  evaluated_at REAL, PRIMARY KEY (prediction_id, horizon));
 CREATE TABLE IF NOT EXISTS invites (
   id INTEGER PRIMARY KEY AUTOINCREMENT, code_hash TEXT NOT NULL UNIQUE, hint TEXT, note TEXT,
   created_at REAL NOT NULL, used_by TEXT, used_at REAL, revoked INTEGER DEFAULT 0);

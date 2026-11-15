@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 
 from . import admin, alerts, auth, config, db, mailer, paper, services
+from .research import data as rdata, evaluate as reval, features as rfeat, jobs as rjobs, model as rmodel, store as rstore
 from .analysis import fundamentals
 from .market import calendar as cal
 from .market import universe, yahoo
@@ -284,6 +285,57 @@ async def admin_accuracy(request: Request, refresh: int = 0):
 async def admin_predictions(request: Request, refresh: int = 0):
     _require_owner(request)
     return admin.predictions(force=bool(refresh))
+
+
+# ---------------------------------------------------------------- research lab (owner only)
+
+@app.get("/api/research/overview")
+async def research_overview(request: Request):
+    _require_owner(request)
+
+    def go():
+        rmodel.ensure_models()
+        checked, changed = rstore.verify()
+        live_weeks = db.q("SELECT COUNT(DISTINCT c.week_of) AS n FROM cohorts c JOIN predictions p ON p.cohort_id=c.id "
+                          "JOIN outcomes o ON o.prediction_id=p.id WHERE c.kind='live' AND o.horizon=7", one=True)
+        return {"coverage": rdata.coverage(), "quality": rdata.quality_report(), "runs": rdata.last_runs(12),
+                "jobs": rjobs.status(), "models": db.q("SELECT * FROM model_versions ORDER BY created_at"),
+                "champion": rmodel.CHAMPION, "cohorts": reval.cohorts()[:80],
+                "integrity": {"checked": checked, "changed": changed[:20]},
+                "live_weeks_evaluated": (live_weeks or {}).get("n") or 0, "weeks_to_validate": 8,
+                "horizons": list(rmodel.HORIZONS), "now_ist": cal.now_ist().strftime("%d %b %Y %H:%M IST")}
+    return await run(go)
+
+
+@app.get("/api/research/cohort/{cid}")
+async def research_cohort(request: Request, cid: int):
+    _require_owner(request)
+
+    def go():
+        syms = {r["symbol"] for r in db.q("SELECT symbol FROM predictions WHERE cohort_id=?", (cid,))}
+        return reval.cohort_detail(rfeat.Store(syms), cid)
+    res = await run(go)
+    if not res:
+        raise HTTPException(404, "No such cohort.")
+    return res
+
+
+@app.get("/api/research/summary")
+async def research_summary(request: Request, kind: str = "live", h: int = 7):
+    _require_owner(request)
+    if kind not in ("live", "simulated") or h not in rmodel.HORIZONS:
+        raise HTTPException(400, "kind must be live or simulated; h one of %s" % (rmodel.HORIZONS,))
+    return await run(reval.summary, kind, h)
+
+
+@app.post("/api/research/run")
+async def research_run(request: Request, body: dict = Body(...)):
+    _require_owner(request)
+    job = body.get("job")
+    if job not in rjobs.JOBS:
+        raise HTTPException(400, "Unknown job.")
+    args = (int(body.get("weeks") or 52),) if job == "simulate" else (int(body.get("days") or 730),)         if job == "backfill" else ()
+    return rjobs.start(job, *args)
 
 
 @app.post("/api/admin/approve")

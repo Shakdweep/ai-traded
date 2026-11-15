@@ -203,3 +203,39 @@ docker run -p 127.0.0.1:8000:8000 -v ai-traded-data:/data --env-file .env ai-tra
 - Fundamentals depend on Screener.in's page layout; if it changes, that panel shows "unavailable" rather than wrong numbers.
 - Backtests use the stock's own history, so sample sizes are small (often 15–35 trades); they are a reality check, not a forecast.
 - Most day traders lose money. This tool is meant to make that visible before you risk anything.
+
+---
+
+## Research lab (owner only)
+
+A prediction-validation platform inside the app (**Research** tab, visible only to the admin login):
+
+- **Weekly 10:** every Monday before the open, `rules-v1` scores liquid NIFTY 500 stocks on the official NSE close
+  (trend, momentum, EMA/SMA 20/50/100/200, RSI, MACD, Bollinger Bands, support/resistance, volume, delivery %,
+  strength vs NIFTY and sector), penalises stocks that are merely overextended, and picks 10 (max 2 per sector).
+- **Forecasts:** for each, an 80% price range at 1, 3, 5 and 7 trading days, direction (Bullish / Bearish / Sideways),
+  confidence (agreement of evidence, not a probability), support, resistance, stop, reward:risk, reasons and what
+  would invalidate the call.
+- **Immutable history:** predictions are inserted once with a SHA-256 fingerprint; the page re-checks every
+  fingerprint. Outcomes are stored separately, insert-once.
+- **Daily monitoring:** each evening predictions are scored against the official close: direction, whether the price
+  landed inside the range (coverage), error (MAE / MAPE), support held, resistance broken, stop hit, NIFTY's move.
+- **Dashboard:** live and *simulated* (replayed past Mondays, using only data available then) are always kept
+  separate. Includes the "say up every time" baseline and the result after costs, because accuracy is not profitability.
+
+Data: NSE's public end-of-day files (`sec_bhavdata_full`, including delivery %) and bulk deals, Yahoo for index
+levels. Today's NIFTY 500 list is used for past dates too, so simulated results carry survivorship bias.
+
+### Automation (GitHub Actions)
+
+`.github/workflows/research.yml` runs `python -m backend.research.jobs ...`:
+
+| When (IST) | Job |
+|---|---|
+| Mon-Fri 19:00 | `daily`: load official data, score predictions |
+| Mon 08:00 | `daily` then `weekly`: this week's 10 |
+| Manual ("Run workflow") | `backfill [days]`, `simulate [weeks]`, `all` |
+
+One-time setup: GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**, name
+`DATABASE_URL`, value = the connection string of the Neon project **ai-traded**. Then **Actions → Research jobs →
+Run workflow → all** to load history and replay the past year. Never put the connection string in the code.

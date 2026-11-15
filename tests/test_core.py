@@ -805,3 +805,135 @@ class TestPredictionOutcomes(unittest.TestCase):
         for ts in (sat, evening):
             r = self.admin.judge(self.call(mode="intraday", ts=ts), None, [])
             self.assertEqual(r["outcome"], "none")
+
+
+class TestResearchLab(unittest.TestCase):
+    """Official data parsing, split adjustment, no look-ahead, weekly 10, immutable storage, evaluation."""
+
+    def setUp(self):
+        from backend.research import data, evaluate, features, model, store
+        self.data, self.ev, self.fx, self.model, self.store = data, evaluate, features, model, store
+        db.db()
+        for t in ("daily_prices", "cohorts", "predictions", "outcomes", "data_runs", "model_versions"):
+            db.x("DELETE FROM %s" % t)
+
+    def seed(self, n_stocks=14, n_days=300, sectors=5):
+        """Synthetic official-style history for n stocks plus NIFTY, on real trading days."""
+        days = self.data.trading_days(datetime.date(2025, 1, 1), datetime.date(2026, 6, 30))[:n_days]
+        rows = []
+        bench = daily_bars(len(days), drift=0.0004, vol=0.009, seed=99)
+        for i, d in enumerate(days):
+            b = bench[i]
+            rows.append({"symbol": "^NSEI", "date": d.isoformat(), "open": b["o"], "high": b["h"], "low": b["l"],
+                         "close": b["c"], "volume": 0, "source": self.data.SOURCE_YAHOO})
+        meta = {}
+        for k in range(n_stocks):
+            sym = "S%02d" % k
+            meta[sym] = {"symbol": sym, "name": "Stock %d" % k, "sector": "Sector %d" % (k % sectors)}
+            bars = daily_bars(len(days), start=100 + 10 * k, drift=0.0005 * (k % 4), vol=0.012, seed=200 + k)
+            for i, d in enumerate(days):
+                b = bars[i]
+                rows.append({"symbol": sym, "date": d.isoformat(), "open": b["o"], "high": b["h"], "low": b["l"],
+                             "close": b["c"], "prev_close": bars[i - 1]["c"] if i else None, "volume": 2e6,
+                             "deliv_qty": 1e6, "deliv_pct": 50.0, "source": self.data.SOURCE_BHAV})
+        self.data.save_prices([dict(r, prev_close=r.get("prev_close"), deliv_qty=r.get("deliv_qty"),
+                                    deliv_pct=r.get("deliv_pct")) for r in rows])
+        return days, meta
+
+    def test_parse_official_file(self):
+        raw = (b"SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, LAST_PRICE, CLOSE_PRICE, "
+               b"AVG_PRICE, TTL_TRD_QNTY, TURNOVER_LACS, NO_OF_TRADES, DELIV_QTY, DELIV_PER\n"
+               b"INFY, EQ, 13-Nov-2026, 1150.00, 1151.00, 1160.50, 1139.00, 1141.00, 1141.50, 1149.2, 5000000, "
+               b"57460.1, 90000, 2600000, 52.00\n"
+               b"INFY, BL, 13-Nov-2026, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -, -\n"
+               b"XYZ, EQ, 13-Nov-2026, 10, 10, 10, 10, 10, -, 10, 1, 1, 1, -, -\n")
+        rows = self.data.parse_bhavcopy(raw)
+        self.assertEqual(len(rows), 1)  # block-deal series and rows without a close are skipped
+        r = rows[0]
+        self.assertEqual((r["symbol"], r["date"], r["close"], r["deliv_pct"], r["volume"]),
+                         ("INFY", "2026-11-13", 1141.5, 52.0, 5000000.0))
+
+    def test_split_adjustment_and_gaps(self):
+        rows = [{"date": "2026-03-02", "open": 1000, "high": 1010, "low": 990, "close": 1000, "prev_close": 990,
+                 "volume": 100, "deliv_pct": 40},
+                {"date": "2026-03-03", "open": 500, "high": 505, "low": 495, "close": 502, "prev_close": 500,
+                 "volume": 200, "deliv_pct": 40}]  # 1:2 split: NSE reports the adjusted previous close 500
+        adj = self.data.adjust(rows)
+        self.assertAlmostEqual(adj[0]["c"], 500.0)
+        self.assertAlmostEqual(adj[0]["v"], 200.0)
+        self.assertAlmostEqual(adj[1]["c"], 502.0)
+        gap = [dict(rows[0]), dict(rows[1], date="2026-03-05")]  # a missing day in between: no adjustment
+        self.assertAlmostEqual(self.data.adjust(gap)[0]["c"], 1000.0)
+
+    def test_no_look_ahead(self):
+        days, meta = self.seed(n_stocks=2, n_days=260)
+        st = self.fx.Store(None)
+        cut = days[240]
+        self.assertEqual(st.upto("S00", cut)[-1]["date"], cut.isoformat())
+        self.assertTrue(all(b["date"] <= cut.isoformat() for b in st.upto("S00", cut)))
+        self.assertEqual(st.after("S00", cut, 3)[0]["date"], days[241].isoformat())
+        f = self.fx.compute(st, "S00", cut)
+        self.assertEqual(f["as_of"], cut.isoformat())
+        self.assertEqual(f["close"], st.upto("S00", cut)[-1]["c"])
+        self.assertIsNone(self.fx.compute(st, "S00", days[100]))  # not enough history yet
+
+    def test_weekly_ten_is_saved_once_and_tamper_evident(self):
+        from backend.research import jobs
+        days, meta = self.seed()
+        st = self.fx.Store(None)
+        as_of = days[260]
+        week = self.ev.week_of(as_of + datetime.timedelta(days=3))
+        cid, made = jobs.make_cohort(st, meta, week, as_of, "simulated")
+        self.assertTrue(made)
+        preds = self.store.predictions(cohort_id=cid)
+        self.assertEqual(len(preds), 10)
+        sectors = [p["forecast"]["sector"] for p in preds]
+        self.assertTrue(all(sectors.count(x) <= 2 for x in sectors))  # at most two per sector
+        fc = preds[0]["forecast"]
+        for h in ("1", "3", "5", "7"):
+            r = fc["ranges"][h]
+            self.assertLess(r["low"], r["mid"])
+            self.assertLess(r["mid"], r["high"])
+        self.assertGreater(fc["ranges"]["7"]["high"] - fc["ranges"]["7"]["low"],
+                           fc["ranges"]["1"]["high"] - fc["ranges"]["1"]["low"])  # wider further out
+        self.assertIn(fc["direction"], ("Bullish", "Bearish", "Sideways"))
+        self.assertTrue(fc["invalidation"])
+        cid2, made2 = jobs.make_cohort(st, meta, week, as_of, "simulated")
+        self.assertEqual((cid2, made2), (cid, False))  # never made twice, never overwritten
+        self.assertEqual(self.store.verify(), (10, []))
+        db.x("UPDATE predictions SET payload=? WHERE id=?", ("{}", preds[0]["id"]))  # simulate tampering
+        self.assertEqual(self.store.verify()[1], [preds[0]["id"]])
+
+    def test_evaluation_against_actuals(self):
+        from backend.research import jobs
+        days, meta = self.seed()
+        st = self.fx.Store(None)
+        as_of = days[260]
+        cid, _ = jobs.make_cohort(st, meta, self.ev.week_of(as_of), as_of, "simulated")
+        saved = self.ev.evaluate_pending(st)
+        self.assertEqual(saved, 40)  # 10 stocks x 4 horizons, all in the past
+        self.assertEqual(self.ev.evaluate_pending(st), 0)  # insert-once
+        o = db.q("SELECT * FROM outcomes WHERE horizon=7", one=False)
+        p = self.store.predictions(cohort_id=cid)[0]
+        mine = [x for x in o if x["prediction_id"] == p["id"]][0]
+        actual = st.after(p["symbol"], p["as_of"], 7)[-1]
+        self.assertEqual(mine["eval_date"], actual["date"])
+        self.assertAlmostEqual(mine["actual_close"], round(actual["c"], 2))
+        rng = p["forecast"]["ranges"]["7"]
+        self.assertEqual(mine["in_range"], int(rng["low"] <= actual["c"] <= rng["high"]))
+        s = self.ev.summary("simulated", 7)
+        self.assertEqual((s["predictions"], s["evaluated"], s["pending"]), (10, 10, 0))
+        self.assertEqual(s["correct"] + s["incorrect"], 10)
+        self.assertIn("coverage", s["overall"])
+        self.assertEqual(self.ev.summary("live", 7)["overall"], {"n": 0})  # live and simulated never mix
+        self.assertTrue(all(len(x["label"]) for x in s["indicators"]))
+        detail = self.ev.cohort_detail(st, cid)
+        self.assertEqual(len(detail["items"]), 10)
+        self.assertEqual(len(detail["items"][0]["outcomes"]), 4)
+
+    def test_weekly_job_refuses_stale_data(self):
+        from backend.research import jobs
+        self.seed(n_stocks=3, n_days=260)
+        with self.assertRaises(RuntimeError) as e:
+            jobs.weekly(today=datetime.date(2026, 11, 16))  # data ends long before this Monday
+        self.assertIn("isn't available yet", str(e.exception))

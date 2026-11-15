@@ -156,7 +156,7 @@ api("/auth/me").then((d) => {
   $("#user-name").title = d.user;
   $("#user-av").textContent = name.slice(0, 1).toUpperCase();
   $("#user-box").hidden = false;
-  if (d.owner) { $("#tab-members").hidden = false; $("#tab-admin").hidden = false; }
+  if (d.owner) { $("#tab-members").hidden = false; $("#tab-admin").hidden = false; $("#tab-research").hidden = false; }
 }).catch(() => { });
 $("#logout-btn").addEventListener("click", async () => {
   try { await api("/auth/logout", { method: "POST" }); } catch { }
@@ -728,6 +728,146 @@ async function viewStatus() {
     <div class="card"><h3>Recent errors</h3>${Object.entries(pr.prices.recent_errors).map(([k, v]) => `<div class="small"><b>${esc(k)}</b> ${esc(v.error)} <span class="dim">${ago(v.ts)}</span></div>`).join("") + s.background.errors.map((e) => `<div class="small"><b>${esc(e.where)}</b> ${esc(e.error)} <span class="dim">${ago(e.ts)}</span></div>`).join("") || '<div class="dim small">None.</div>'}</div></div>`;
 }
 
+// ------------------------------------------------------------------ research lab (owner only)
+const rs = { cohort: null, kind: "live", h: 7 };
+const DIR_CLS = { Bullish: "d-TRADE", Bearish: "d-NO", Sideways: "d-WAIT" };
+const ACT_CLS = { Up: "up", Down: "down", Sideways: "muted" };
+const pctOrDash = (v, d = 1) => v == null ? "–" : fmt(v, d) + "%";
+
+async function viewResearch() {
+  const my = state.route;
+  app.innerHTML = `<div class="loading"><span class="spinner"></span> Loading research lab…</div>`;
+  const ov = await api("/research/overview");
+  if (my !== state.route) return;
+  const cv = ov.coverage, q = ov.quality, live = ov.cohorts.filter((c) => c.kind === "live"), sim = ov.cohorts.filter((c) => c.kind === "simulated");
+  if (!rs.cohort || !ov.cohorts.some((c) => c.id === rs.cohort)) rs.cohort = (live[0] || sim[0] || {}).id || null;
+  const lastRun = (job) => ov.runs.find((r) => r.job === job);
+  const runLine = (job, label) => { const r = lastRun(job); return `<div class="small"><b>${label}:</b> ${r ? `${esc(r.status)} ${ago(r.finished_at)} <span class="dim">· ${esc(r.message || "")}</span>` : '<span class="dim">never run</span>'}</div>`; };
+  const job = (k) => ov.jobs[k] || {};
+  const jobBtn = (k, label, extra = "") => {
+    const j = job(k);
+    return j.state === "running" ? `<button class="btn sm" disabled><span class="spinner"></span> ${label}${j.progress ? " · " + esc(j.progress) : ""}</button>`
+      : `<button class="btn sm" data-job="${k}" ${extra}>${label}</button>`;
+  };
+  const validated = ov.live_weeks_evaluated >= ov.weeks_to_validate;
+  app.innerHTML = `<div class="grid">
+    <div class="card spanall"><div class="row between"><div>
+        <h3 style="margin:0">Research lab <span class="sub">prediction validation, owner only</span></h3>
+        <div class="muted small" style="margin-top:6px">Every Monday the model picks 10 NIFTY 500 stocks and forecasts their price range 1, 3, 5 and 7 trading days ahead.
+          Each forecast is saved once and never changed, then checked against the official NSE close every evening. Every prediction is a hypothesis, not advice.</div></div>
+        <div class="row">${jobBtn("daily", "Update data + score")}${jobBtn("weekly", "Make this week's 10")}</div></div>
+      <div class="kv" style="margin-top:18px">
+        <div><span>Official end-of-day data</span><b class="small">${cv.equities ? `${cv.equities} stocks · ${esc(cv.from)} → ${esc(cv.to)}` : "not loaded yet"}</b></div>
+        <div><span>Indices (Yahoo, daily)</span><b class="small">${cv.indices ? `${cv.indices} · to ${esc(cv.indices_to)}` : "not loaded yet"}</b></div>
+        <div><span>Data type</span><b class="small">End of day (official), not live</b></div>
+        <div><span>Model</span><b class="small">${esc(ov.champion)} · ${validated ? "validated on live data" : `experimental, not validated (${ov.live_weeks_evaluated}/${ov.weeks_to_validate} live weeks)`}</b></div>
+        <div><span>Prediction integrity</span><b class="small ${ov.integrity.changed.length ? "down" : "up"}">${ov.integrity.changed.length ? ov.integrity.changed.length + " changed!" : `${ov.integrity.checked} checked, none changed`}</b></div>
+        <div><span>Data quality</span><b class="small ${q.ok ? "up" : "down"}">${q.ok ? "no gaps found" : esc((q.issues[0] || {}).detail || q.message || "issues")}</b></div>
+      </div>
+      <div style="margin-top:14px">${runLine("daily", "Daily update")}${runLine("weekly", "Weekly 10")}${runLine("simulate", "Simulation")}${runLine("backfill", "History load")}</div>
+      <details style="margin-top:12px"><summary class="small muted">History tools (normally run by GitHub Actions)</summary>
+        <div class="row" style="margin-top:10px">${jobBtn("backfill", "Load 2 years of official data")}${jobBtn("simulate", "Replay past 52 Mondays (simulated)")}
+        <span class="dim small">Heavy jobs: on Render's free server they can take a long time or stop if the site goes to sleep.</span></div></details>
+    </div>
+    <div id="rs-cohort"></div>
+    <div id="rs-dash"></div>
+  </div>`;
+  app.querySelectorAll("[data-job]").forEach((b) => b.onclick = async () => {
+    try { await api("/research/run", { method: "POST", body: { job: b.dataset.job } }); toast("Started. This page updates when it finishes."); }
+    catch (e) { toast(esc(e.message), 6000); }
+    setTimeout(() => { if (my === state.route) viewResearch(); }, 1500);
+  });
+  if (Object.values(ov.jobs).some((j) => j.state === "running")) setTimeout(() => { if (my === state.route && $("#rs-dash")) viewResearch(); }, 8000);
+  renderCohortPicker(ov);
+  renderDashboard();
+}
+
+async function renderCohortPicker(ov) {
+  const box = $("#rs-cohort");
+  if (!box) return;
+  if (!ov.cohorts.length) {
+    box.innerHTML = `<div class="card spanall"><h3>This week's 10</h3><div class="empty">No forecasts yet. Load data, then make this week's 10 (or replay past Mondays).</div></div>`;
+    return;
+  }
+  const opts = ov.cohorts.map((c) => `<option value="${c.id}" ${c.id === rs.cohort ? "selected" : ""}>${c.kind === "live" ? "LIVE" : "Simulated"} · week of ${esc(c.week_of)} (data ${esc(c.as_of)})</option>`).join("");
+  box.innerHTML = `<div class="card spanall"><div class="row between"><h3 style="margin:0">Weekly 10 <span class="sub">forecasts and daily monitoring</span></h3>
+    <select id="rs-pick">${opts}</select></div><div id="rs-cohort-body"><div class="loading"><span class="spinner"></span></div></div></div>`;
+  $("#rs-pick").onchange = () => { rs.cohort = +$("#rs-pick").value; renderCohortPicker(ov); };
+  const c = await api("/research/cohort/" + rs.cohort);
+  const body = $("#rs-cohort-body");
+  if (!body) return;
+  const notes = JSON.parse(c.notes || "{}");
+  const hz = ["1", "3", "5", "7"];
+  const outBadge = (o) => !o ? '<span class="dim small">pending</span>' :
+    `<span class="${o.dir_correct ? "up" : "down"}">${o.dir_correct ? "✓" : "✗"} ${esc(o.actual_dir)}</span> · <span class="${o.in_range ? "up" : "down"}">${o.in_range ? "in range" : "outside"}</span>`;
+  body.innerHTML = `
+    <div class="notice-line ${c.kind === "live" ? "" : "sim"}">${c.kind === "live" ? "LIVE forecasts" : "SIMULATED: replayed on a past date using only data available then"} ·
+      made ${new Date(c.created_at * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })} · ${esc(notes.data || "")} · model ${esc(c.model_version)} ·
+      ${c.scored} stocks scored · <span class="dim">${esc(notes.universe_note || "")}</span></div>
+    <div class="tablewrap" style="margin-top:14px"><table class="plain"><thead><tr><th>Stock</th><th>Call</th><th class="n">Price then</th>
+      ${hz.map((h) => `<th class="n">Day ${h} range</th>`).join("")}<th class="n">Latest</th>${hz.map((h) => `<th>Day ${h} result</th>`).join("")}</tr></thead><tbody>
+      ${c.items.map((i) => { const f = i.forecast; return `<tr>
+        <td><a href="#/stock/${esc(i.symbol)}"><b>${esc(i.symbol)}</b></a><div class="dim small">${esc(f.sector || "")}</div></td>
+        <td><span class="exit-pill ${DIR_CLS[f.direction]}">${esc(f.direction)}</span><div class="dim small">conf ${f.confidence}</div></td>
+        <td class="n">${fmt(f.price)}</td>
+        ${hz.map((h) => `<td class="n small">${fmt(f.ranges[h].low)}–${fmt(f.ranges[h].high)}<div class="dim">mid ${fmt(f.ranges[h].mid)} (${pct(f.ranges[h].ret_pct)})</div></td>`).join("")}
+        <td class="n">${i.latest ? `${fmt(i.latest.close)}<div class="${cls(i.latest.ret_pct)} small">${pct(i.latest.ret_pct)} · day ${i.days_elapsed}</div>` : '<span class="dim">–</span>'}</td>
+        ${hz.map((h) => `<td class="small">${outBadge(i.outcomes[h])}</td>`).join("")}</tr>`; }).join("")}
+    </tbody></table></div>
+    <div class="rs-cards">${c.items.map((i) => { const f = i.forecast; return `<details class="exit-card"><summary><b>${esc(i.symbol)}</b> ${esc(f.name || "")}
+        <span class="exit-pill ${DIR_CLS[f.direction]}">${esc(f.direction)}</span> <span class="dim small">stop ${fmt(f.stop)} · target ${fmt(f.target)} · R:R ${f.rr == null ? "–" : fmt(f.rr, 2)}</span></summary>
+      <div class="grid g2" style="margin-top:12px">
+        <div><div class="small muted"><b>Why it was picked</b></div><ul class="exit-why">${f.why_selected.map((t) => `<li>${esc(t)}</li>`).join("") || "<li>Rule score</li>"}</ul>
+          <div class="small muted"><b>Main reasons</b></div><ul class="exit-why">${f.reasons.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>
+        <div><div class="small"><b>Support</b> ${f.supports.map((x) => "₹" + fmt(x)).join(", ") || "–"} · <b>Resistance</b> ${f.resistances.map((x) => "₹" + fmt(x)).join(", ") || "–"}</div>
+          <div class="small" style="margin-top:6px"><b>Score</b> ${f.score} · <b>Selection</b> ${f.selection_score} · <b>Confidence</b> ${f.confidence}/100 (agreement of evidence, not a probability)</div>
+          <div class="small muted" style="margin-top:10px"><b>What would prove it wrong</b></div><ul class="exit-why">${f.invalidation.map((t) => `<li class="x-warn">${esc(t)}</li>`).join("")}</ul>
+          <div class="dim small mono" style="word-break:break-all">fingerprint ${esc(i.hash.slice(0, 16))}…</div></div></div></details>`; }).join("")}</div>`;
+}
+
+async function renderDashboard() {
+  const box = $("#rs-dash");
+  if (!box) return;
+  box.innerHTML = `<div class="card spanall"><div class="loading"><span class="spinner"></span> Loading accuracy…</div></div>`;
+  const s = await api(`/research/summary?kind=${rs.kind}&h=${rs.h}`);
+  if (!$("#rs-dash")) return;
+  const o = s.overall || {}, seg = (b) => `<div class="seg">${b}</div>`;
+  const kindBtns = seg(["live", "simulated"].map((k) => `<button data-kind="${k}" class="${rs.kind === k ? "on" : ""}">${k === "live" ? "Live" : "Simulated"}</button>`).join(""));
+  const hBtns = seg([1, 3, 5, 7].map((h) => `<button data-h="${h}" class="${rs.h === h ? "on" : ""}">${h} day${h > 1 ? "s" : ""}</button>`).join(""));
+  const tbl = (title, obj, keyLabel) => {
+    const rows = Object.entries(obj || {});
+    return rows.length ? `<div><h4 class="acc-h">${title}</h4><div class="tablewrap"><table class="plain"><thead><tr><th>${keyLabel}</th><th class="n">Checked</th><th class="n">Direction right</th><th class="n">In range</th><th class="n">MAPE</th></tr></thead><tbody>
+      ${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="n">${v.n}</td><td class="n"><b>${pctOrDash(v.dir_acc)}</b></td><td class="n">${pctOrDash(v.coverage)}</td><td class="n">${pctOrDash(v.mape, 2)}</td></tr>`).join("")}</tbody></table></div></div>` : "";
+  };
+  const kpi = (label, value, sub = "") => `<div class="acc-card"><div class="dim small">${label}</div><div class="acc-big">${value}</div><div class="small muted">${sub}</div></div>`;
+  const ind = s.indicators || [];
+  const best = ind.filter((x) => x.lift != null && x.n >= 10).slice(0, 4), worst = ind.filter((x) => x.lift != null && x.n >= 10).slice(-4).reverse();
+  const bars = (list, key) => list.map((w) => `<div class="bar-row" style="grid-template-columns:90px 1fr 54px"><span class="dim small mono">${esc(w[key])}</span>
+      <div class="bar-track"><i style="width:${w.dir_acc || 0}%"></i></div><b class="small">${pctOrDash(w.dir_acc, 0)}</b></div>`).join("");
+  box.innerHTML = `<div class="card spanall"><div class="row between"><h3 style="margin:0">Prediction accuracy <span class="sub">${s.kind === "live" ? "live predictions only" : "SIMULATED history (replayed, labelled separately)"}</span></h3>
+      <div class="row">${kindBtns}${hBtns}</div></div>
+    ${!o.n ? `<div class="empty" style="margin-top:16px">No ${s.kind} predictions have reached their ${s.horizon}-day result yet (${s.predictions} made, ${s.pending} pending). Nothing is shown as a success until it has been checked.</div>` : `
+    <div class="acc-grid" style="margin-top:16px">
+      ${kpi("Predictions", s.predictions, `${s.evaluated} checked · ${s.pending} still pending`)}
+      ${kpi("Direction right", pctOrDash(o.dir_acc), `${s.correct} right · ${s.incorrect} wrong`)}
+      ${kpi("Saying 'up' every time", pctOrDash(s.baseline_always_bullish), "the bar to beat")}
+      ${kpi("Inside the 80% range", pctOrDash(o.coverage), "should be close to 80%")}
+      ${kpi("Average error", "₹" + fmt(o.mae), `MAPE ${pctOrDash(o.mape, 2)}`)}
+      ${s.trading ? kpi("If you acted on it", pct(s.trading.avg_net_pct), `per trade after ${s.trading.costs_pct}% costs · ${pctOrDash(s.trading.win_pct, 0)} profitable`) : ""}
+    </div>
+    <h4 class="acc-h">By horizon</h4><div class="tablewrap"><table class="plain"><thead><tr><th>Horizon</th><th class="n">Checked</th><th class="n">Direction right</th><th class="n">In range</th><th class="n">MAE ₹</th><th class="n">MAPE</th><th class="n">Support held</th><th class="n">Resistance broken</th><th class="n">Stop hit</th></tr></thead><tbody>
+      ${Object.entries(s.horizons).map(([h, v]) => `<tr><td>${h} day${h > 1 ? "s" : ""}</td><td class="n">${v.n}</td><td class="n"><b>${pctOrDash(v.dir_acc)}</b></td><td class="n">${pctOrDash(v.coverage)}</td><td class="n">${v.mae == null ? "–" : fmt(v.mae)}</td><td class="n">${pctOrDash(v.mape, 2)}</td><td class="n">${pctOrDash(v.support_held)}</td><td class="n">${pctOrDash(v.resistance_broken)}</td><td class="n">${pctOrDash(v.stop_hit)}</td></tr>`).join("")}</tbody></table></div>
+    <div class="grid g2">${tbl("By predicted direction", s.by_direction, "Call")}${tbl("By confidence", s.by_confidence, "Confidence")}</div>
+    <div class="grid g2"><div><h4 class="acc-h">Indicators that helped most <span class="dim small">direction right when present vs absent</span></h4>${best.length ? best.map((x) => `<div class="small" style="margin:8px 0"><b class="${x.lift >= 0 ? "up" : "down"}">${x.lift > 0 ? "+" : ""}${fmt(x.lift, 1)} pts</b> ${esc(x.label)} <span class="dim">(${x.n} times, ${pctOrDash(x.acc_when_present)} vs ${pctOrDash(x.acc_when_absent)})</span></div>`).join("") : '<div class="dim small">Needs at least 10 cases per indicator.</div>'}</div>
+      <div><h4 class="acc-h">Indicators that hurt most</h4>${worst.length ? worst.map((x) => `<div class="small" style="margin:8px 0"><b class="${x.lift >= 0 ? "up" : "down"}">${x.lift > 0 ? "+" : ""}${fmt(x.lift, 1)} pts</b> ${esc(x.label)} <span class="dim">(${x.n} times, ${pctOrDash(x.acc_when_present)} vs ${pctOrDash(x.acc_when_absent)})</span></div>`).join("") : '<div class="dim small">Needs at least 10 cases per indicator.</div>'}</div></div>
+    ${tbl("By sector", s.by_sector, "Sector")}
+    <div class="grid g2"><div><h4 class="acc-h">Week by week <span class="dim small">direction right</span></h4><div class="bars">${bars(s.weekly, "week")}</div></div>
+      <div><h4 class="acc-h">Month by month</h4><div class="bars">${bars(s.monthly, "month")}</div></div></div>`}
+  </div>`;
+  box.querySelectorAll("[data-kind]").forEach((b) => b.onclick = () => { rs.kind = b.dataset.kind; renderDashboard(); });
+  box.querySelectorAll("[data-h]").forEach((b) => b.onclick = () => { rs.h = +b.dataset.h; renderDashboard(); });
+}
+
 // ------------------------------------------------------------------ predictions: did they come true? (owner)
 const OUTCOME = { met: ["d-TRADE", "✅ Met"], missed: ["d-NO", "❌ Missed"], expired: ["d-WAIT", "⌛ Expired"], open: ["d-INFO", "⏳ Open"],
   not_triggered: ["r-na", "➖ Not triggered"] };
@@ -1051,6 +1191,7 @@ async function route() {
       case "status": return await viewStatus();
       case "members": return await viewMembers();
       case "admin": return await viewAdmin();
+      case "research": return await viewResearch();
       case "stock": return await viewStock(decodeURIComponent(parts[1] || ""));
       default: return await viewToday();
     }
