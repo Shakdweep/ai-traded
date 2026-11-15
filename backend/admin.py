@@ -225,6 +225,9 @@ def judge(call, daily_bars, bars5=None, now=None):
         and (entry is None or entry < call["target1"])
     base["entry"] = entry
     if call["mode"] == "intraday":
+        t = cal.to_ist(call["ts"]).time()
+        if not cal.is_trading_day(d) or not cal.OPEN <= t < cal.CLOSE:
+            return dict(base, kind="none", outcome="none", text="Made while the market was closed")
         bars = [b for b in (bars5 or []) if b["t"] >= call["ts"] and cal.to_ist(b["t"]).date() == d]
         closed_day = d < cal.now_ist().date() or not cal.market_status()["open"] and d == cal.now_ist().date()
         if with_plan:

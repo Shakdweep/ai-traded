@@ -798,3 +798,10 @@ class TestPredictionOutcomes(unittest.TestCase):
         self.assertEqual(r["outcome"], "not_triggered")
         s = self.admin.summarize([dict(r, segment="swing")])
         self.assertEqual((s["swing"]["not_triggered"], s["swing"]["finished"]), (1, 0))
+
+    def test_intraday_calls_outside_market_hours_are_not_predictions(self):
+        sat = int(datetime.datetime(2026, 3, 7, 11, 0, tzinfo=cal.IST).timestamp())     # Saturday
+        evening = int(datetime.datetime(2026, 3, 2, 18, 0, tzinfo=cal.IST).timestamp())  # Monday after close
+        for ts in (sat, evening):
+            r = self.admin.judge(self.call(mode="intraday", ts=ts), None, [])
+            self.assertEqual(r["outcome"], "none")
