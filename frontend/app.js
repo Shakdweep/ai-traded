@@ -156,7 +156,7 @@ api("/auth/me").then((d) => {
   $("#user-name").title = d.user;
   $("#user-av").textContent = name.slice(0, 1).toUpperCase();
   $("#user-box").hidden = false;
-  if (d.owner) $("#tab-members").hidden = false;
+  if (d.owner) { $("#tab-members").hidden = false; $("#tab-admin").hidden = false; }
 }).catch(() => { });
 $("#logout-btn").addEventListener("click", async () => {
   try { await api("/auth/logout", { method: "POST" }); } catch { }
@@ -728,6 +728,134 @@ async function viewStatus() {
     <div class="card"><h3>Recent errors</h3>${Object.entries(pr.prices.recent_errors).map(([k, v]) => `<div class="small"><b>${esc(k)}</b> ${esc(v.error)} <span class="dim">${ago(v.ts)}</span></div>`).join("") + s.background.errors.map((e) => `<div class="small"><b>${esc(e.where)}</b> ${esc(e.error)} <span class="dim">${ago(e.ts)}</span></div>`).join("") || '<div class="dim small">None.</div>'}</div></div>`;
 }
 
+// ------------------------------------------------------------------ admin panel (owner only)
+function verdictOf(seg, minSample) {
+  const d = seg.direction || {};
+  if (!d.calls || d.calls < minSample) return { cls: "d-WAIT", text: "Too few calls to judge", sub: `${d.calls || 0} of ${minSample} needed` };
+  const edge = seg.bullish_edge_pct;
+  if (edge == null) return { cls: "d-WAIT", text: "No bullish calls yet", sub: "" };
+  if (edge >= 3) return { cls: "d-TRADE", text: "Better than chance", sub: `bullish calls right ${fmt(seg.bullish_hit_pct, 1)}% vs ${fmt(seg.base_up_pct, 1)}% base rate` };
+  if (edge <= -3) return { cls: "d-NO", text: "Worse than chance", sub: `bullish calls right ${fmt(seg.bullish_hit_pct, 1)}% vs ${fmt(seg.base_up_pct, 1)}% base rate` };
+  return { cls: "d-WAIT", text: "About a coin flip", sub: `bullish calls right ${fmt(seg.bullish_hit_pct, 1)}% vs ${fmt(seg.base_up_pct, 1)}% base rate` };
+}
+
+function accuracyBlock(title, rep, minSample, intro) {
+  if (!rep || !rep.segments) return "";
+  const cards = rep.segments.map((s) => {
+    const v = verdictOf(s, minSample), d = s.direction || {};
+    return `<div class="acc-card"><div class="dim small">${esc(s.name)}</div>
+      <div class="acc-big">${d.hit_pct == null ? "–" : fmt(d.hit_pct, 1) + "%"}</div>
+      <div class="small muted">of ${d.calls || 0} up/down calls right</div>
+      <div style="margin-top:10px"><span class="exit-pill ${v.cls}">${esc(v.text)}</span></div>
+      <div class="dim small" style="margin-top:6px">${esc(v.sub)}</div></div>`;
+  }).join("");
+  const tables = rep.segments.filter((s) => s.rows.length).map((s) => `
+    <h4 class="acc-h">${esc(s.name)} <span class="dim small">· ${esc(s.note)} · base rate: ${s.base_up_pct == null ? "–" : fmt(s.base_up_pct, 1) + "% of stocks went up"}</span></h4>
+    <div class="tablewrap"><table class="plain"><thead><tr><th>Rating</th><th class="n">Times given</th><th class="n">Right</th>
+      <th class="n">Avg move after</th><th class="n">Vs NIFTY</th><th class="n">Beat NIFTY</th></tr></thead><tbody>
+      ${s.rows.map((r) => `<tr><td>${ratingBadge(r.rating)}</td><td class="n">${r.n}</td>
+        <td class="n">${r.hit_pct == null ? '<span class="dim">no direction</span>' : `<b>${fmt(r.hit_pct, 1)}%</b>${r.enough ? "" : ' <span class="dim small">(few)</span>'}`}</td>
+        <td class="n ${cls(r.avg_ret_pct)}">${pct(r.avg_ret_pct)}</td><td class="n ${cls(r.avg_vs_nifty_pct)}">${pct(r.avg_vs_nifty_pct)}</td>
+        <td class="n">${r.beat_nifty_pct == null ? "–" : fmt(r.beat_nifty_pct, 1) + "%"}</td></tr>`).join("")}
+    </tbody></table></div>`).join("");
+  return `<div class="card spanall"><h3>${title}</h3><p class="muted" style="margin-top:0">${intro}</p>
+    <div class="acc-grid">${cards}</div>${tables || '<div class="empty" style="margin-top:18px">No results yet.</div>'}</div>`;
+}
+
+function ratingBadge(r) {
+  const c = { "STRONG BULLISH": "r-strong", BULLISH: "r-bull", WAIT: "r-wait", "HIGH RISK": "r-risk", BEARISH: "r-bear", AVOID: "r-avoid" }[r] || "r-na";
+  return `<span class="rating ${c}">${esc(r)}</span>`;
+}
+
+async function viewAdmin() {
+  const my = state.route;
+  app.innerHTML = `<div class="loading"><span class="spinner"></span> Loading admin panel…</div>`;
+  const [o, acc] = await Promise.all([api("/admin/overview"), api("/admin/accuracy")]);
+  if (my !== state.route) return;
+  const k = o.kpis, h = o.health;
+  const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "–";
+  const ago2 = (ts) => ts ? ago(ts) : "never";
+  const kpi = (label, value, sub = "") => `<div class="card idx"><span class="name">${label}</span><div class="px">${value}</div><div class="dim small">${sub}</div></div>`;
+  const maxSign = Math.max(1, ...o.signups_by_day.map(([, n]) => n));
+  const seg = o.paper_by_segment;
+  app.innerHTML = `<div class="grid">
+    <div class="grid g4">
+      ${kpi("Members", k.members, `${k.pending} waiting for approval`)}
+      ${kpi("Active", k.active_24h + " today", `${k.active_7d} in the last 7 days`)}
+      ${kpi("Joined (7 days)", k.joined_7d, `invites: ${k.invites_used} used, ${k.invites_unused} unused`)}
+      ${kpi("Paper trades", k.closed_trades + " closed", `${k.open_positions} open · ${k.paper_orders} orders`)}
+    </div>
+
+    <div id="acc-area"></div>
+
+    <div class="card spanall"><h3>Paper-trade results by segment <span class="sub">everyone's closed trades</span></h3>
+      ${Object.keys(seg).length ? `<div class="tablewrap"><table class="plain"><thead><tr><th>Segment</th><th class="n">Trades</th><th class="n">Win rate</th>
+        <th class="n">Total P&amp;L</th><th class="n">Avg per trade</th><th class="n">Avg R</th><th>How they ended</th></tr></thead><tbody>
+        ${Object.entries(seg).map(([m, s]) => `<tr><td><b>${esc(m)}</b></td><td class="n">${s.trades}</td><td class="n">${s.win_rate == null ? "–" : fmt(s.win_rate, 1) + "%"}</td>
+          <td class="n ${cls(s.pnl)}">${inr(s.pnl)}</td><td class="n ${cls(s.avg_pnl)}">${inr(s.avg_pnl)}</td><td class="n ${cls(s.avg_r)}">${s.avg_r == null ? "–" : fmt(s.avg_r, 2) + "R"}</td>
+          <td class="small">${Object.entries(s.exit_reasons).map(([r, n]) => `${esc(r)} ×${n}`).join(", ")}</td></tr>`).join("")}
+        </tbody></table></div>` : '<div class="empty">No closed paper trades yet.</div>'}
+    </div>
+
+    <div class="card spanall"><h3>People <span class="sub">${o.people.length} including you</span></h3>
+      <div class="tablewrap"><table class="plain"><thead><tr><th>Name</th><th>Mobile / email</th><th>Status</th><th>Invite</th><th>Joined</th>
+        <th>Last active</th><th class="n">Watchlist</th><th class="n">Open</th><th class="n">Closed</th><th class="n">Win rate</th><th class="n">Realised P&amp;L</th></tr></thead><tbody>
+        ${o.people.map((p) => `<tr><td><b>${esc(p.name)}</b></td><td class="mono small">${esc(p.id)}${p.contact_email ? `<div class="dim">${esc(p.contact_email)}</div>` : ""}</td>
+          <td>${p.status === "owner" ? '<span class="tag b">admin</span>' : p.status === "pending" ? '<span class="tag w">pending</span>' : '<span class="tag">member</span>'}</td>
+          <td class="small">${esc(p.invite_note || "–")}</td><td class="small">${when(p.created_at)}</td>
+          <td class="small">${p.status === "owner" ? "–" : ago2(Math.max(p.last_seen || 0, p.last_login || 0) || null)}</td>
+          <td class="n">${p.watchlist}</td><td class="n">${p.open_positions}</td><td class="n">${p.closed_trades}</td>
+          <td class="n">${p.win_rate == null ? "–" : fmt(p.win_rate, 1) + "%"}</td><td class="n ${cls(p.realised_pnl)}">${inr(p.realised_pnl)}</td></tr>`).join("")}
+      </tbody></table></div>
+      <p class="dim small" style="margin-bottom:0">Manage invites, approvals and passwords on the <a href="#/members">Members</a> tab.</p>
+    </div>
+
+    <div class="grid g2">
+      <div class="card"><h3>Sign-ups by day <span class="sub">last 30 days with sign-ups</span></h3>
+        ${o.signups_by_day.length ? `<div class="bars">${o.signups_by_day.map(([d, n]) => `<div class="bar-row"><span class="dim small mono">${esc(d.slice(5))}</span>
+          <div class="bar-track"><i style="width:${Math.round(100 * n / maxSign)}%"></i></div><b class="small">${n}</b></div>`).join("")}</div>`
+          : '<div class="empty">No sign-ups yet.</div>'}</div>
+      <div class="card"><h3>System health</h3><div class="kv">
+        <div><span>Database</span><b>${esc(h.storage)}</b></div>
+        <div><span>Email</span><b>${esc(h.email.provider)}</b></div>
+        <div><span>Market</span><b>${esc(h.market.state || (h.market.open ? "open" : "closed"))}</b></div>
+        <div><span>Ratings stored</span><b>${h.signals_stored ?? "–"}</b></div>
+        <div><span>Background cycles</span><b>${h.background.cycles ?? "–"}</b></div>
+        <div><span>Last scan</span><b class="small">${h.background.last_scan ? ago(h.background.last_scan) : "not yet"}</b></div></div>
+        ${h.scans.length ? `<div class="small muted" style="margin-top:14px">${h.scans.map((s) => `${esc(s.universe)} (${esc(s.mode)}): ${s.analysed ?? 0} stocks, ${esc(s.finished_ist || "running")}${s.errors ? `, ${s.errors} errors` : ""}`).join("<br>")}</div>` : ""}
+        ${h.background_errors.length ? `<div class="small down" style="margin-top:12px">${h.background_errors.map((e) => `${esc(e.where)}: ${esc(e.error)} (${ago(e.ts)})`).join("<br>")}</div>` : '<div class="small up" style="margin-top:12px">No background errors.</div>'}
+      </div>
+    </div></div>`;
+  renderAccuracy(acc);
+}
+
+function renderAccuracy(acc) {
+  const area = $("#acc-area");
+  if (!area) return;
+  const my = state.route;
+  const r = acc.result;
+  const head = `<div class="card spanall acc-head"><div class="row between"><div><h3 style="margin:0">How accurate is the site?</h3>
+      <div class="muted small" style="margin-top:6px">A call is <b>right</b> when the price moved its way: bullish ratings if the price went up, bearish ratings if it went down.
+      <b>Base rate</b> is how often any stock went up over the same windows; a call only adds value when it beats that.
+      Past accuracy does not promise future results.</div></div>
+      <div class="row">${acc.status === "running" ? '<span class="small muted"><span class="spinner"></span> Calculating (about a minute)…</span>' :
+        `<span class="dim small">${r ? "Updated " + esc(r.computed_ist) : ""}</span><button class="btn sm" id="acc-refresh">Recalculate</button>`}</div></div>
+      ${acc.error ? `<div class="small down" style="margin-top:10px">Last calculation failed: ${esc(acc.error)}</div>` : ""}</div>`;
+  if (!r) {
+    area.innerHTML = head + (acc.status === "running" ? "" : '<div class="empty">No report yet.</div>');
+  } else {
+    const live = r.live, rep = r.replay;
+    area.innerHTML = head +
+      accuracyBlock("Live: what the site actually said", live, r.min_sample,
+        `Every rating the site gave since ${esc(live.since || "launch")} (first call per stock, segment and day): <b>${live.calls}</b> calls, <b>${live.pending}</b> still waiting for their result.`) +
+      accuracyBlock("Historical replay: last year on NIFTY 50", rep, r.min_sample,
+        `The same swing rating rules re-run every day from ${esc(rep.period || "–")} on ${rep.stocks} NIFTY 50 stocks, using only data available on that day. Intraday can't be replayed (free data keeps only 60 days of 5-minute bars), so intraday appears in Live only.`);
+  }
+  const btn = $("#acc-refresh");
+  if (btn) btn.onclick = async () => renderAccuracy(await api("/admin/accuracy?refresh=1"));
+  if (acc.status === "running") setTimeout(async () => { if (my === state.route && $("#acc-area")) renderAccuracy(await api("/admin/accuracy")); }, 5000);
+}
+
 // ------------------------------------------------------------------ members (owner only)
 async function viewMembers() {
   const [d, inv] = await Promise.all([api("/admin/accounts"), api("/admin/invites")]);
@@ -847,6 +975,7 @@ async function route() {
       case "settings": return await viewSettings();
       case "status": return await viewStatus();
       case "members": return await viewMembers();
+      case "admin": return await viewAdmin();
       case "stock": return await viewStock(decodeURIComponent(parts[1] || ""));
       default: return await viewToday();
     }

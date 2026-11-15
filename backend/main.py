@@ -14,7 +14,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import alerts, auth, config, db, mailer, paper, services
+from . import admin, alerts, auth, config, db, mailer, paper, services
 from .analysis import fundamentals
 from .market import calendar as cal
 from .market import universe, yahoo
@@ -113,6 +113,8 @@ async def require_login(request, call_next):
             return _private(JSONResponse({"error": "Please log in.", "login": True}, status_code=401))
         return _private(RedirectResponse("/login", status_code=303))
     db.set_owner(user or "")  # every query in this request works on this person's own data
+    if user:
+        admin.touch(user)  # "last active" for the admin panel (at most every 5 minutes)
     return _private(await call_next(request))
 
 
@@ -264,6 +266,18 @@ def _require_owner(request):
 async def admin_accounts(request: Request):
     _require_owner(request)
     return {"accounts": await run(auth.list_accounts)}
+
+
+@app.get("/api/admin/overview")
+async def admin_overview(request: Request):
+    _require_owner(request)
+    return await run(admin.overview, _bg)
+
+
+@app.get("/api/admin/accuracy")
+async def admin_accuracy(request: Request, refresh: int = 0):
+    _require_owner(request)
+    return admin.accuracy(force=bool(refresh))
 
 
 @app.post("/api/admin/approve")

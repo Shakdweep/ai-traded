@@ -103,6 +103,7 @@ MIGRATIONS = [
     ("accounts", "contact_email", "TEXT"),
     ("accounts", "invite_id", "INTEGER"),
     ("accounts", "approved_at", "REAL"),
+    ("accounts", "last_seen", "REAL"),
 ]
 POST_MIGRATION = """
 CREATE INDEX IF NOT EXISTS alerts_owner ON alerts(owner, ts);

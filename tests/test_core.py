@@ -659,3 +659,55 @@ class TestExitCheck(unittest.TestCase):
                 paper.yahoo.chart, paper.yahoo.quote_from_chart = saved
         with db.as_owner("someone-else"):
             self.assertIn("No open position", paper.raise_stop(pid, 105)["error"])  # not your position
+
+
+class TestAdminAccuracy(unittest.TestCase):
+    """Accuracy maths for the admin panel (synthetic data, no network)."""
+
+    def test_segment_scoring(self):
+        from backend import admin
+        seg = admin._Segment("x", "y")
+        for r, ret in [("BULLISH", 0.02), ("BULLISH", -0.01), ("STRONG BULLISH", 0.03), ("BEARISH", -0.02),
+                       ("AVOID", 0.01), ("WAIT", 0.05), ("HIGH RISK", -0.03)]:
+            seg.add(r, ret, 0.0)
+        out = seg.out()
+        self.assertEqual(out["observations"], 7)
+        self.assertEqual(out["direction"]["calls"], 5)           # WAIT / HIGH RISK make no direction call
+        self.assertEqual(out["direction"]["hit_pct"], 60.0)      # 2 bullish up + 1 bearish down of 5
+        self.assertAlmostEqual(out["base_up_pct"], 57.1)         # 4 of 7 went up
+        self.assertAlmostEqual(out["bullish_hit_pct"], 66.7)     # 2 of 3 bullish calls
+        self.assertAlmostEqual(out["bullish_edge_pct"], 9.6)
+        rows = {r["rating"]: r for r in out["rows"]}
+        self.assertIsNone(rows["WAIT"]["hit_pct"])
+        self.assertFalse(rows["BULLISH"]["enough"])               # below MIN_SAMPLE
+
+    def test_replay_runs_on_history(self):
+        from backend import admin
+        bars = daily_bars(560, drift=0.001, seed=11)
+        bench = {"bars": daily_bars(560, drift=0.0005, seed=12)}
+        rep = admin.replay(["AAA"], bench, {"AAA": {"bars": bars}}, days=60)
+        self.assertEqual(rep["stocks"], 1)
+        self.assertEqual([s["name"] for s in rep["segments"]],
+                         ["Swing · 5 trading days", "Swing · 10 trading days", "Swing · 20 trading days"])
+        self.assertGreater(rep["segments"][0]["observations"], 50)
+        self.assertEqual(admin.replay(["BBB"], bench, {"BBB": {"bars": bars[:100]}})["stocks"], 0)  # too short
+
+    def test_live_tracking_uses_first_call_per_day(self):
+        from backend import admin
+        db.db()
+        db.x("DELETE FROM signals")
+        bars = daily_bars(80, drift=0.002, seed=13)
+        d0 = bars[40]
+        for k in range(3):  # the scan repeats; only the first call of the day counts
+            db.x("INSERT INTO signals(ts, symbol, mode, rating, price) VALUES(?,?,?,?,?)",
+                 (d0["t"] + 60 * k, "AAA", "swing", "BULLISH" if k == 0 else "BEARISH", d0["c"]))
+        db.x("INSERT INTO signals(ts, symbol, mode, rating, price) VALUES(?,?,?,?,?)",
+             (bars[-1]["t"], "AAA", "swing", "BULLISH", bars[-1]["c"]))  # too recent: still pending
+        res = admin.live({"AAA": {"bars": bars}}, {"bars": daily_bars(80, seed=14)})
+        self.assertEqual(res["calls"], 2)
+        self.assertEqual(res["pending"], 1)
+        swing5 = [s for s in res["segments"] if s["name"].startswith("Swing · 5")][0]
+        self.assertEqual(swing5["observations"], 1)
+        self.assertEqual(swing5["rows"][0]["rating"], "BULLISH")
+        expect_up = bars[45]["c"] > d0["c"]
+        self.assertEqual(swing5["direction"]["hit_pct"], 100.0 if expect_up else 0.0)

@@ -204,3 +204,16 @@ footer { color: var(--dim); font-size: 12.5px; line-height: 1.7; padding: 40px 2
 .exit-why li { margin: 6px 0; }
 .exit-why .x-bad { color: var(--bear); } .exit-why .x-good { color: var(--bull); }
 .exit-why .x-warn { color: var(--warn); } .exit-why .x-info { color: var(--info); } .exit-why .x-muted { color: var(--muted); }
+
+/* admin panel */
+.acc-head { border-color: var(--line2); }
+.acc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin: 6px 0 8px; }
+.acc-card { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; background: var(--panel2); }
+.acc-big { font: 700 30px/1.2 var(--mono); margin: 8px 0 2px; }
+.acc-h { margin: 26px 0 10px; font-size: 14px; }
+.bars { display: grid; gap: 8px; }
+.bar-row { display: grid; grid-template-columns: 52px 1fr 28px; gap: 10px; align-items: center; }
+.bar-track { height: 10px; border-radius: 99px; background: var(--panel2); overflow: hidden; }
+.bar-track i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--bull), var(--info)); }
+/* 12 tabs: keep them on one line on laptop screens */
+@media (min-width: 721px) and (max-width: 1500px) { nav.tabs { gap: 0; padding: 0 16px; } nav.tabs a { padding: 15px 10px; font-size: 14px; } }
