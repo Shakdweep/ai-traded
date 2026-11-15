@@ -869,6 +869,57 @@ async function renderDashboard() {
   box.querySelectorAll("[data-h]").forEach((b) => b.onclick = () => { rs.h = +b.dataset.h; renderDashboard(); });
 }
 
+// ------------------------------------------------------------------ Rs 5,000 intraday test (owner)
+function renderBot(r) {
+  const box = $("#bot-area");
+  if (!box || !r) return;
+  const a = r.account, b = r.balances, t = r.totals, cfg = a.config;
+  const tm = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "–";
+  const dayName = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
+  const status = { scheduled: ["d-INFO", "Starts " + dayName(r.test_days[0])], running: ["d-TRADE", "Running"], finished: ["r-na", "Finished"] }[a.status] || ["r-na", a.status];
+  const dayRows = r.test_days.map((d, i) => {
+    const row = r.days.find((x) => x.day === d);
+    if (!row) return `<tr><td>Day ${i + 1} · ${dayName(d)}</td><td colspan="7" class="dim">not started yet</td></tr>`;
+    const live = row.end_equity == null;
+    return `<tr><td><b>Day ${i + 1}</b> · ${dayName(d)}</td><td class="n">${inr(row.start_equity, 2)}</td>
+      <td class="n">${live ? "–" : row.trades}</td><td class="n">${live ? "–" : inr(row.invested, 2)}</td><td class="n">${live ? "–" : inr(row.received, 2)}</td>
+      <td class="n">${live ? "–" : inr(row.charges, 2)}</td><td class="n ${cls(row.net_pnl)}">${live ? '<span class="dim">trading…</span>' : inr(row.net_pnl, 2)}</td>
+      <td class="n"><b>${live ? "–" : inr(row.end_equity, 2)}</b></td></tr>`;
+  }).join("");
+  box.innerHTML = `<div class="card spanall bot-card"><div class="row between"><div>
+      <h3 style="margin:0">${esc(a.name)} <span class="exit-pill ${status[0]}">${esc(status[1])}</span></h3>
+      <div class="muted small" style="margin-top:6px">A paper account that trades the Intraday tab's opening-range breakout on NIFTY 50 by itself,
+        ${r.test_days.length} trading days from ${dayName(r.test_days[0])} to ${dayName(r.test_days[r.test_days.length - 1])}.
+        One position at a time · max ${cfg.max_trades_per_day} trades a day · stops for the day after a ${cfg.daily_loss_limit_pct}% loss ·
+        entries ${cfg.no_entry_before}–${cfg.no_entry_after} · everything closed by ${cfg.flat_by} · ${esc(cfg.leverage)} · real Indian intraday charges.</div></div></div>
+    <div class="acc-grid" style="margin-top:16px">
+      <div class="acc-card"><div class="dim small">Balance now</div><div class="acc-big">${inr(b.equity, 2)}</div><div class="small muted">started with ${inr(a.start_capital, 0)}</div></div>
+      <div class="acc-card"><div class="dim small">Return</div><div class="acc-big ${cls(r.return_pct)}">${pct(r.return_pct)}</div><div class="small muted">net ${inr(t.net, 2)} after charges</div></div>
+      <div class="acc-card"><div class="dim small">Before charges</div><div class="acc-big ${cls(t.gross)}">${inr(t.gross, 2)}</div><div class="small muted">charges paid ${inr(t.charges, 2)}</div></div>
+      <div class="acc-card"><div class="dim small">Trades</div><div class="acc-big">${t.closed}</div><div class="small muted">${t.wins} profitable · ${t.trades - t.closed} open now</div></div>
+      <div class="acc-card"><div class="dim small">Cash free</div><div class="acc-big">${inr(b.cash, 2)}</div><div class="small muted">${b.tied ? inr(b.tied, 2) + " in an open trade" : "no open trade"}</div></div>
+    </div>
+    <h4 class="acc-h">Day by day</h4>
+    <div class="tablewrap"><table class="plain"><thead><tr><th>Day</th><th class="n">Started with</th><th class="n">Trades</th><th class="n">Invested</th>
+      <th class="n">Got back</th><th class="n">Charges</th><th class="n">Net P&amp;L</th><th class="n">Ended with</th></tr></thead><tbody>${dayRows}</tbody></table></div>
+    <h4 class="acc-h">Every trade</h4>
+    ${r.trades.length ? `<div class="tablewrap"><table class="plain"><thead><tr><th>Day</th><th>Stock</th><th class="n">Shares</th><th>Bought</th><th class="n">Buy price</th>
+      <th class="n">Invested</th><th class="n">Stop / target</th><th>Sold</th><th class="n">Sell price</th><th class="n">Got back</th><th>Why sold</th><th class="n">Charges</th><th class="n">Net P&amp;L</th></tr></thead><tbody>
+      ${r.trades.map((x) => `<tr><td class="small">${dayName(x.day)}</td><td><b>${esc(x.symbol)}</b><div class="dim small">${esc(x.signal.rating || "")}</div></td>
+        <td class="n">${x.qty}</td><td class="small">${tm(x.entry_time)}</td><td class="n">${fmt(x.entry_price)}</td><td class="n">${inr(x.invested, 2)}</td>
+        <td class="n small">${fmt(x.stop)} / ${fmt(x.target)}</td>
+        <td class="small">${x.status === "open" ? '<span class="exit-pill d-INFO">open</span>' : tm(x.exit_time)}</td>
+        <td class="n">${x.exit_price == null ? "–" : fmt(x.exit_price)}</td><td class="n">${x.received == null ? "–" : inr(x.received, 2)}</td>
+        <td class="small">${esc(x.exit_reason || "–")}</td><td class="n" title="${esc(x.charges_detail ? Object.entries(x.charges_detail).map(([k, v]) => k + " ₹" + v).join(", ") : "")}">${x.charges == null ? "–" : inr(x.charges, 2)}</td>
+        <td class="n ${cls(x.net_pnl)}"><b>${x.net_pnl == null ? "–" : inr(x.net_pnl, 2)}</b></td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">No trades yet. ${a.status === "scheduled" ? "It starts trading at 09:30 IST on " + dayName(r.test_days[0]) + "." : "No breakout met all the rules so far."}</div>`}
+    <details style="margin-top:18px"><summary class="small muted">Bot log: every decision (${r.events.length} latest)</summary>
+      <div class="bot-log">${r.events.map((e) => `<div><span class="dim mono">${new Date(e.ts * 1000).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+        <span class="tag ${e.kind === "buy" ? "b" : e.kind === "sell" ? "w" : e.kind === "error" ? "s" : ""}">${esc(e.kind)}</span> ${esc(e.message)}</div>`).join("") || '<div class="dim">Nothing logged yet.</div>'}</div></details>
+    <p class="dim small" style="margin-bottom:0">${esc(r.data_note)}</p>
+  </div>`;
+}
+
 // ------------------------------------------------------------------ predictions: did they come true? (owner)
 const OUTCOME = { met: ["d-TRADE", "✅ Met"], missed: ["d-NO", "❌ Missed"], expired: ["d-WAIT", "⌛ Expired"], open: ["d-INFO", "⏳ Open"],
   not_triggered: ["r-na", "➖ Not triggered"] };
@@ -983,7 +1034,8 @@ function ratingBadge(r) {
 async function viewAdmin() {
   const my = state.route;
   app.innerHTML = `<div class="loading"><span class="spinner"></span> Loading admin panel…</div>`;
-  const [o, acc, pr] = await Promise.all([api("/admin/overview"), api("/admin/accuracy"), api("/admin/predictions")]);
+  const [o, acc, pr, bot] = await Promise.all([api("/admin/overview"), api("/admin/accuracy"), api("/admin/predictions"),
+    api("/admin/bot").catch(() => null)]);
   if (my !== state.route) return;
   const k = o.kpis, h = o.health;
   const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "–";
@@ -998,6 +1050,8 @@ async function viewAdmin() {
       ${kpi("Joined (7 days)", k.joined_7d, `invites: ${k.invites_used} used, ${k.invites_unused} unused`)}
       ${kpi("Paper trades", k.closed_trades + " closed", `${k.open_positions} open · ${k.paper_orders} orders`)}
     </div>
+
+    <div id="bot-area"></div>
 
     <div id="pred-area"></div>
 
@@ -1041,6 +1095,7 @@ async function viewAdmin() {
         ${h.background_errors.length ? `<div class="small down" style="margin-top:12px">${h.background_errors.map((e) => `${esc(e.where)}: ${esc(e.error)} (${ago(e.ts)})`).join("<br>")}</div>` : '<div class="small up" style="margin-top:12px">No background errors.</div>'}
       </div>
     </div></div>`;
+  renderBot(bot);
   renderPredictions(pr);
   renderAccuracy(acc);
 }

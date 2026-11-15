@@ -944,3 +944,114 @@ class TestResearchLab(unittest.TestCase):
         with self.assertRaises(RuntimeError) as e:
             jobs.weekly(today=datetime.date(2026, 11, 16))  # data ends long before this Monday
         self.assertIn("isn't available yet", str(e.exception))
+
+
+class TestIntradayBot(unittest.TestCase):
+    """The Rs 5,000 paper bot over a simulated session: entry, sizing, exits, square-off, charges, day summary."""
+
+    class Clock:
+        def __init__(self, dt):
+            self.t = dt.timestamp()
+
+        def time(self):
+            return self.t
+
+        def sleep(self, s):
+            self.t += s
+
+        def now(self):
+            return datetime.datetime.fromtimestamp(self.t, cal.IST)
+
+    def setUp(self):
+        from backend.bot import intraday as bot
+        self.bot = bot
+        db.db()
+        for t in ("bot_accounts", "bot_trades", "bot_days", "bot_events"):
+            db.x("DELETE FROM %s" % t)
+        self.saved = (bot.time, bot.services.run_scan, bot._bars5)
+        self.day = datetime.date(2026, 11, 16)
+        self.clock = self.Clock(datetime.datetime(2026, 11, 16, 9, 25, tzinfo=cal.IST))
+        bot.time = self.clock
+
+    def tearDown(self):
+        self.bot.time, self.bot.services.run_scan, self.bot._bars5 = self.saved
+
+    def bars(self, path):
+        """5-minute bars from 09:15; path(i, t) -> (o, h, l, c)."""
+        t0 = int(datetime.datetime(2026, 11, 16, 9, 15, tzinfo=cal.IST).timestamp())
+        out = []
+        for i in range(75):
+            o, h, l, c = path(i, t0 + 300 * i)
+            out.append({"t": t0 + 300 * i, "o": o, "h": h, "l": l, "c": c, "v": 1000})
+        return out
+
+    def scan_from(self, when):
+        """AAA becomes actionable at `when` (IST hh:mm) with entry 100, stop 99, target 102."""
+        def run_scan(key, mode, symbols=None):
+            on = self.clock.now().time() >= datetime.time(*when)
+            plan = {"actionable": on, "entry": 100.0, "stop": 99.0, "target1": 102.0, "setup": "ORB", "reward_risk": 2}
+            return {"rows": [{"symbol": "AAA", "price": 100.0, "rating": "BULLISH", "score": 50, "confidence": 70,
+                              "plan": plan, "or_high": 99.9}]}
+        return run_scan
+
+    def test_target_trade_and_day_summary(self):
+        b = self.bot
+        b.services.run_scan = self.scan_from((10, 0))
+        ten30 = datetime.datetime(2026, 11, 16, 10, 30, tzinfo=cal.IST).timestamp()
+        b._bars5 = lambda sym: self.bars(lambda i, t: (100, 102.5, 99.8, 101) if t >= ten30 else (100, 100.4, 99.6, 100))
+        b.run(now_fn=self.clock.now)
+        tr = b.trades()
+        self.assertEqual(len(tr), 1)
+        t = tr[0]
+        self.assertEqual((t["symbol"], t["status"], t["exit_reason"]), ("AAA", "closed", "target"))
+        # sized by the app's own risk engine: Rs 50 max loss at the stop INCLUDING slippage and charges
+        expect = rk.size_position(100.05, 99.0, b.bot_settings(5000.0, 5000.0), target=102.0, product="intraday")
+        self.assertEqual(t["qty"], expect["qty"])
+        self.assertLessEqual(expect["max_loss"], 50.0)
+        self.assertAlmostEqual(t["invested"], round(t["qty"] * 100.05, 2))
+        self.assertGreaterEqual(cal.to_ist(t["entry_time"]).time(), datetime.time(10, 0))
+        self.assertAlmostEqual(t["exit_price"], round(102 * (1 - 0.0005), 2))
+        costs = rk.round_trip_costs(t["qty"], t["entry_price"], t["exit_price"], "intraday")
+        self.assertAlmostEqual(t["charges"], costs["total"])
+        self.assertAlmostEqual(t["net_pnl"], round(t["qty"] * (t["exit_price"] - t["entry_price"]) - costs["total"], 2))
+        day = db.q("SELECT * FROM bot_days", one=True)
+        self.assertEqual((day["start_equity"], day["trades"], day["wins"]), (5000.0, 1, 1))
+        self.assertAlmostEqual(day["end_equity"], 5000 + t["net_pnl"], places=2)
+        self.assertAlmostEqual(day["received"], t["received"])
+        rep = b.report()
+        self.assertAlmostEqual(rep["balances"]["equity"], day["end_equity"], places=2)
+        self.assertEqual(rep["totals"]["trades"], 1)  # AAA never bought twice the same day
+        kinds = {e["kind"] for e in rep["events"]}
+        self.assertTrue({"start", "buy", "sell", "day"} <= kinds)
+
+    def test_stop_and_square_off(self):
+        b = self.bot
+        b.services.run_scan = self.scan_from((10, 0))
+        ten30 = datetime.datetime(2026, 11, 16, 10, 30, tzinfo=cal.IST).timestamp()
+        b._bars5 = lambda sym: self.bars(lambda i, t: (98.8, 99.2, 98.5, 98.9) if t >= ten30 else (100, 100.4, 99.6, 100))
+        b.run(now_fn=self.clock.now)
+        t = b.trades()[0]
+        self.assertEqual(t["exit_reason"], "stop-loss")
+        self.assertAlmostEqual(t["exit_price"], round(98.8 * (1 - 0.0005), 2))  # gapped below the stop: the open
+        self.assertLess(t["net_pnl"], 0)
+        # a flat day with no target or stop: closed at the square-off time
+        for tb in ("bot_trades", "bot_days", "bot_events"):
+            db.x("DELETE FROM %s" % tb)
+        self.clock = self.Clock(datetime.datetime(2026, 11, 16, 9, 25, tzinfo=cal.IST))
+        b.time = self.clock
+        b.services.run_scan = self.scan_from((14, 30))
+        b._bars5 = lambda sym: self.bars(lambda i, t: (100, 100.4, 99.6, 100.2))
+        b.run(now_fn=self.clock.now)
+        t = b.trades()[0]
+        self.assertTrue(t["exit_reason"].startswith("square-off"))
+        self.assertGreaterEqual(cal.to_ist(t["exit_time"]).time(), datetime.time(15, 15))
+
+    def test_only_on_test_days(self):
+        b = self.bot
+        b.services.run_scan = lambda *a, **k: self.fail("must not scan outside the test days")
+        sat = self.Clock(datetime.datetime(2026, 11, 21, 10, 0, tzinfo=cal.IST))
+        self.assertIn("holiday or weekend", b.run(now_fn=sat.now))
+        after = self.Clock(datetime.datetime(2026, 11, 23, 10, 0, tzinfo=cal.IST))
+        self.assertIn("Not a test day", b.run(now_fn=after.now))
+        self.assertEqual(db.q("SELECT status FROM bot_accounts", one=True)["status"], "finished")
+        self.assertEqual(b.trading_days_of_test()[0].isoformat(), "2026-11-16")

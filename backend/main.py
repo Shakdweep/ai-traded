@@ -338,6 +338,13 @@ async def research_run(request: Request, body: dict = Body(...)):
     return rjobs.start(job, *args)
 
 
+@app.get("/api/admin/bot")
+async def admin_bot(request: Request):
+    _require_owner(request)
+    from .bot import intraday as bot
+    return await run(bot.report)
+
+
 @app.post("/api/admin/approve")
 async def admin_approve(request: Request, body: dict = Body(...)):
     _require_owner(request)

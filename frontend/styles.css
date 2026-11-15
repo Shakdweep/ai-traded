@@ -227,3 +227,7 @@ footer { color: var(--dim); font-size: 12.5px; line-height: 1.7; padding: 40px 2
 .rs-cards summary { cursor: pointer; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .grid > * { min-width: 0; }                 /* wide tables scroll inside their card, not the page */
 .kv b.small { font: 600 13px/1.45 var(--sans); }
+
+/* Rs 5,000 intraday test */
+.bot-card { border-color: color-mix(in srgb, var(--accent) 45%, var(--line2)); }
+.bot-log { max-height: 360px; overflow: auto; margin-top: 10px; font-size: 13px; display: grid; gap: 6px; }

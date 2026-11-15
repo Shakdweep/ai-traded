@@ -26,7 +26,7 @@ USING_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
 # tables whose INSERTs return the new row id
 _ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal", "email_codes", "invites",
-              "data_runs", "cohorts", "predictions"}
+              "data_runs", "cohorts", "predictions", "bot_trades", "bot_events"}
 
 # Whose data a request (or a background step) works on: the signed-in account id, or ""
 # on your own PC where there is no login. Set once per request by the login middleware.
@@ -114,6 +114,22 @@ CREATE TABLE IF NOT EXISTS outcomes (
   window_high REAL, window_low REAL, predicted_dir TEXT, actual_dir TEXT, dir_correct INTEGER, in_range INTEGER,
   abs_err REAL, pct_err REAL, support_held INTEGER, resistance_broken INTEGER, stop_hit INTEGER, nifty_ret_pct REAL,
   evaluated_at REAL, PRIMARY KEY (prediction_id, horizon));
+CREATE TABLE IF NOT EXISTS bot_accounts (
+  id TEXT PRIMARY KEY, name TEXT, start_capital REAL NOT NULL, start_date TEXT, trading_days INTEGER, config TEXT,
+  created_at REAL, status TEXT);
+CREATE TABLE IF NOT EXISTS bot_trades (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, day TEXT NOT NULL, symbol TEXT NOT NULL,
+  qty INTEGER NOT NULL, entry_time REAL, entry_bar_t REAL, entry_price REAL, invested REAL, stop REAL, target REAL,
+  status TEXT NOT NULL, signal TEXT, last_checked_t REAL, exit_time REAL, exit_price REAL, exit_reason TEXT,
+  received REAL, charges REAL, charges_detail TEXT, gross_pnl REAL, net_pnl REAL);
+CREATE INDEX IF NOT EXISTS bot_trades_account ON bot_trades(account, day);
+CREATE TABLE IF NOT EXISTS bot_days (
+  account TEXT NOT NULL, day TEXT NOT NULL, start_equity REAL, start_cash REAL, end_equity REAL, trades INTEGER,
+  wins INTEGER, invested REAL, received REAL, charges REAL, net_pnl REAL, closed_at REAL, PRIMARY KEY (account, day));
+CREATE TABLE IF NOT EXISTS bot_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, ts REAL NOT NULL, day TEXT, kind TEXT, symbol TEXT,
+  message TEXT, data TEXT);
+CREATE INDEX IF NOT EXISTS bot_events_account ON bot_events(account, ts);
 CREATE TABLE IF NOT EXISTS invites (
   id INTEGER PRIMARY KEY AUTOINCREMENT, code_hash TEXT NOT NULL UNIQUE, hint TEXT, note TEXT,
   created_at REAL NOT NULL, used_by TEXT, used_at REAL, revoked INTEGER DEFAULT 0);
