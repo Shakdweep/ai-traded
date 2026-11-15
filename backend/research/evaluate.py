@@ -122,6 +122,18 @@ def summary(kind="live", horizon=7):
         res["baseline_always_bullish"] = round(100 * up / len(rows), 1)  # accuracy of just saying "up" every time
         res["correct"] = sum(r["dir_correct"] for r in rows)
         res["incorrect"] = len(rows) - res["correct"]
+        # the fair benchmark: did the calls beat simply holding the market (NIFTY 50) over the same days?
+        vs = [r for r in rows if r["nifty_ret_pct"] is not None and r["predicted_dir"] != "Sideways"]
+        if vs:
+            sign = lambda r: 1 if r["predicted_dir"] == "Bullish" else -1  # noqa: E731
+            res["vs_nifty"] = {
+                "n": len(vs),
+                "beat_pct": round(100 * sum(1 for r in vs if sign(r) * (r["actual_ret_pct"] - r["nifty_ret_pct"]) > 0)
+                                  / len(vs), 1),
+                "avg_excess_pct": round(sum(sign(r) * (r["actual_ret_pct"] - r["nifty_ret_pct"]) for r in vs)
+                                        / len(vs), 3),
+                "avg_stock_pct": round(sum(r["actual_ret_pct"] for r in vs) / len(vs), 3),
+                "avg_nifty_pct": round(sum(r["nifty_ret_pct"] for r in vs) / len(vs), 3)}
 
     def group(keyf):
         g = {}

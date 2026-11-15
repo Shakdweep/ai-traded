@@ -850,7 +850,8 @@ async function renderDashboard() {
     <div class="acc-grid" style="margin-top:16px">
       ${kpi("Predictions", s.predictions, `${s.evaluated} checked · ${s.pending} still pending`)}
       ${kpi("Direction right", pctOrDash(o.dir_acc), `${s.correct} right · ${s.incorrect} wrong`)}
-      ${kpi("Saying 'up' every time", pctOrDash(s.baseline_always_bullish), "the bar to beat")}
+      ${s.vs_nifty ? kpi("Beat NIFTY", pctOrDash(s.vs_nifty.beat_pct), `avg ${pct(s.vs_nifty.avg_excess_pct)} vs NIFTY · picks ${pct(s.vs_nifty.avg_stock_pct)}, NIFTY ${pct(s.vs_nifty.avg_nifty_pct)}`) : ""}
+      ${kpi("Saying 'up' every time", pctOrDash(s.baseline_always_bullish), "same stocks; equal to 'direction right' when every call is bullish")}
       ${kpi("Inside the 80% range", pctOrDash(o.coverage), "should be close to 80%")}
       ${kpi("Average error", "₹" + fmt(o.mae), `MAPE ${pctOrDash(o.mape, 2)}`)}
       ${s.trading ? kpi("If you acted on it", pct(s.trading.avg_net_pct), `per trade after ${s.trading.costs_pct}% costs · ${pctOrDash(s.trading.win_pct, 0)} profitable`) : ""}

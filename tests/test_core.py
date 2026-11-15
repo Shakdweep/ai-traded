@@ -925,6 +925,13 @@ class TestResearchLab(unittest.TestCase):
         self.assertEqual((s["predictions"], s["evaluated"], s["pending"]), (10, 10, 0))
         self.assertEqual(s["correct"] + s["incorrect"], 10)
         self.assertIn("coverage", s["overall"])
+        v = s["vs_nifty"]
+        self.assertEqual(v["n"], sum(1 for r in db.q("SELECT * FROM outcomes WHERE horizon=7")
+                                     if r["predicted_dir"] != "Sideways"))
+        rows7 = [r for r in db.q("SELECT * FROM outcomes WHERE horizon=7") if r["predicted_dir"] != "Sideways"]
+        expect = sum((1 if r["predicted_dir"] == "Bullish" else -1) * (r["actual_ret_pct"] - r["nifty_ret_pct"])
+                     for r in rows7) / len(rows7)  # bearish calls "beat" NIFTY by falling more than it
+        self.assertAlmostEqual(v["avg_excess_pct"], expect, places=2)
         self.assertEqual(self.ev.summary("live", 7)["overall"], {"n": 0})  # live and simulated never mix
         self.assertTrue(all(len(x["label"]) for x in s["indicators"]))
         detail = self.ev.cohort_detail(st, cid)
