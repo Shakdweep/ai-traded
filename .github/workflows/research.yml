@@ -1,0 +1,63 @@
+# Research jobs for AI Traded (see backend/research/jobs.py).
+# Needs ONE repository secret: DATABASE_URL = the connection string of the separate Neon
+# project "ai-traded" (Settings > Secrets and variables > Actions > New repository secret).
+# Never put the connection string in this file.
+name: Research jobs
+
+on:
+  schedule:
+    - cron: "30 13 * * 1-5"   # 19:00 IST Mon-Fri: official NSE end-of-day data + score predictions
+    - cron: "30 2 * * 1"      # 08:00 IST Monday: refresh data, then make this week's 10 forecasts
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Job to run"
+        required: true
+        default: daily
+        type: choice
+        options: [daily, weekly, backfill, simulate, all]
+      amount:
+        description: "Optional: backfill = days of history (default 730), simulate = past weeks (default 52)"
+        required: false
+        default: ""
+
+concurrency:
+  group: research-jobs
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TRADER_DISABLE_BACKGROUND: "1"
+      TRADER_DATA_DIR: /tmp/aitraded-data
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements.txt -r requirements-hosted.txt
+      - name: Check the database secret
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Add the DATABASE_URL repository secret (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+      - name: Run
+        env:
+          JOB_INPUT: ${{ github.event.inputs.job }}
+          AMOUNT: ${{ github.event.inputs.amount }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [ -n "$JOB_INPUT" ]; then
+            python -m backend.research.jobs "$JOB_INPUT" $AMOUNT
+          elif [ "$SCHEDULE" = "30 2 * * 1" ]; then
+            python -m backend.research.jobs daily && python -m backend.research.jobs weekly
+          else
+            python -m backend.research.jobs daily
+          fi
