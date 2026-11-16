@@ -1075,3 +1075,32 @@ class TestIntradayBot(unittest.TestCase):
         self.assertEqual(b.run(now_fn=self.clock.now), "day done")
         self.assertTrue(b.day_closed(datetime.date(2026, 11, 17)))
         self.assertIn("already closed", b.run(now_fn=self.clock.now))  # a late backup run does nothing
+
+
+class TestToday5(unittest.TestCase):
+    def test_ranking_and_no_padding(self):
+        from backend import services
+
+        def row(sym, rating, score, actionable, entry=100.0, stop=99.0, t1=102.0, rr=2.0):
+            return {"symbol": sym, "rating": rating, "score": score, "confidence": 60, "price": 100.0,
+                    "plan": {"actionable": actionable, "entry": entry, "stop": stop, "target1": t1, "reward_risk": rr}}
+        rows = [row("WAIT1", "BULLISH", 90, False), row("GO1", "BULLISH", 40, True), row("GO2", "STRONG BULLISH", 70, True),
+                row("BEAR", "BEARISH", 99, True), row("BADRR", "BULLISH", 95, True, rr=1.2),
+                row("NOSTOP", "BULLISH", 95, True, stop=101.0), {"symbol": "NOPLAN", "rating": "BULLISH", "plan": None}]
+        for r in rows:
+            if r["symbol"] == "WAIT1":
+                r["price"] = 99.5  # still below its entry
+            if r.get("plan"):
+                r["plan"]["entry_high"] = 100.2
+        rows.append(dict(row("RAN", "STRONG BULLISH", 99, True), price=101.0))   # ran past the entry range
+        rows.append(dict(row("DONE", "STRONG BULLISH", 99, True), price=102.5))  # already above the target
+        picks, moved = services.today5(rows, {"open": True})
+        self.assertEqual([p["symbol"] for p in picks], ["GO2", "GO1", "WAIT1"])  # triggered first, then by score
+        self.assertEqual(moved, 2)                                               # RAN and DONE left out
+        self.assertEqual(picks[0]["state"], "BUY ZONE")
+        self.assertEqual(picks[2]["state"], "WAIT FOR BREAKOUT")
+        self.assertEqual(services.today5([], {"open": True}), ([], 0))  # nothing qualifies -> empty, never padded
+        many = [dict(row("S%d" % i, "BULLISH", i, True)) for i in range(9)]
+        self.assertEqual(len(services.today5(many, {})[0]), 5)
+        closed, _ = services.today5(many, {}, window_open=False)
+        self.assertTrue(all(p["state"] == "ENTRY WINDOW CLOSED" for p in closed))

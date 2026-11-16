@@ -343,6 +343,34 @@ async def admin_predictions(request: Request, refresh: int = 0):
 
 # ---------------------------------------------------------------- research lab (owner only)
 
+@app.get("/api/today5")
+async def today5(request: Request):
+    """Owner only: today's top intraday plans on NIFTY 50 (unvalidated rules - shown to the owner, not members)."""
+    _require_owner(request)
+    key = ("nifty50", "intraday")
+    res = services.SCANS.get(key)
+    st = cal.market_status()
+    stale = not res or not res.get("finished") or time.time() - res["finished"] > (360 if st["open"] else 6 * 3600)
+    if stale and not services.is_running(*key):
+        res = await run(services.run_scan, "nifty50", "intraday")
+    res = res or {"rows": []}
+    rows = res.get("rows", [])
+    session = None
+    for r in rows:
+        fr = r.get("freshness") or {}
+        if fr.get("as_of"):
+            session = fr["as_of"][:10]
+            break
+    now = cal.now_ist()
+    window = st["open"] and datetime.time(9, 30) <= now.time() <= datetime.time(14, 45)
+    picks, moved = services.today5(rows, st, window_open=window)
+    return {"picks": picks, "moved": moved, "window_open": window, "scanned": len(rows), "market": st,
+            "session": session, "is_today": session == cal.now_ist().date().isoformat(),
+            "scan_finished_ist": res.get("finished_ist"), "running": bool(res.get("running")),
+            "now_ist": cal.now_ist().strftime("%H:%M:%S IST"),
+            "rules": {"no_entry_before": "09:30", "no_entry_after": "14:45", "flat_by": "15:15"}}
+
+
 @app.get("/api/research/overview")
 async def research_overview(request: Request):
     _require_owner(request)

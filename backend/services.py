@@ -486,3 +486,49 @@ def briefing():
         "method": "Composed from the scan, index trend, breadth, VIX, global cues and the last 24h of high-impact "
                   "news. Rules-based, not a prediction. Not investment advice.",
     }
+
+
+# ---------------------------------------------------------------- today's intraday 5 (owner)
+
+TODAY5_BULL = ("STRONG BULLISH", "BULLISH")
+
+
+def today5(rows, market, limit=5, window_open=True):
+    """Up to 5 NIFTY 50 intraday plans still worth acting on, best first. Never padded.
+    BUY ZONE = breakout confirmed AND the price is still inside the entry range;
+    WAIT FOR BREAKOUT = no breakout yet AND the price is still below the entry.
+    Stocks that already ran past the entry (or the target) are left out: don't chase.
+    Outside the entry window every plan is marked ENTRY WINDOW CLOSED (reference only).
+    -> (picks, number that already moved)"""
+    picks, moved = [], 0
+    for r in rows:
+        p = r.get("plan") or {}
+        if r.get("rating") not in TODAY5_BULL or not p.get("entry") or not p.get("stop") or not p.get("target1"):
+            continue
+        if p["stop"] >= p["entry"] or (p.get("reward_risk") or 0) < 1.5:
+            continue
+        price = r.get("price") or 0
+        hi = p.get("entry_high") or p["entry"]
+        if price >= p["target1"] or price <= p["stop"] or (p.get("actionable") and price > hi):
+            moved += 1  # already ran past the entry / hit the target / fell to the stop
+            continue
+        if p.get("actionable"):
+            state = "BUY ZONE"
+        elif price < p["entry"]:
+            state = "WAIT FOR BREAKOUT"
+        else:
+            moved += 1
+            continue
+        if not window_open:
+            state = "ENTRY WINDOW CLOSED"
+        picks.append({
+            "symbol": r["symbol"], "name": r.get("name"), "price": r.get("price"), "change_pct": r.get("change_pct"),
+            "rating": r["rating"], "score": r.get("score"), "confidence": r.get("confidence"),
+            "state": state,
+            "entry": p["entry"], "entry_high": p.get("entry_high"), "stop": p["stop"], "target1": p["target1"],
+            "target2": p.get("target2"), "reward_risk": p.get("reward_risk"), "setup": p.get("setup"),
+            "qty_1l": r.get("qty"), "max_loss_1l": r.get("max_loss"), "or_high": r.get("or_high"),
+            "or_low": r.get("or_low"), "vwap": r.get("vwap"), "why": (r.get("setup_labels") or [])[:4],
+            "blockers": p.get("message"), "freshness": r.get("freshness")})
+    picks.sort(key=lambda x: (x["state"] == "BUY ZONE", x["score"] or 0, x["confidence"] or 0), reverse=True)
+    return picks[:limit], moved

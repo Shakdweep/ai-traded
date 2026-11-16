@@ -231,3 +231,16 @@ footer { color: var(--dim); font-size: 12.5px; line-height: 1.7; padding: 40px 2
 /* Rs 5,000 intraday test */
 .bot-card { border-color: color-mix(in srgb, var(--accent) 45%, var(--line2)); }
 .bot-log { max-height: 360px; overflow: auto; margin-top: 10px; font-size: 13px; display: grid; gap: 6px; }
+
+/* today's intraday 5 */
+.t5-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 20px; }
+.t5-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; min-width: 0; }
+.t5-rank { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; color: #fff;
+  background: linear-gradient(135deg, var(--bull), var(--info)); flex: none; }
+.t5-sym { font-size: 18px; }
+.t5-price { font: 700 20px var(--mono); }
+.t5-steps { display: grid; gap: 10px; }
+.t5-step { display: grid; gap: 3px; padding: 10px 12px; border-radius: 10px; border-left: 4px solid var(--line2); background: var(--panel2); font-size: 14px; }
+.t5-step b:first-child { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.t5-step.buy { border-left-color: var(--bull); } .t5-step.stop { border-left-color: var(--bear); }
+.t5-step.tgt { border-left-color: var(--info); } .t5-step.time { border-left-color: var(--warn); }

@@ -156,7 +156,7 @@ api("/auth/me").then((d) => {
   $("#user-name").title = d.user;
   $("#user-av").textContent = name.slice(0, 1).toUpperCase();
   $("#user-box").hidden = false;
-  if (d.owner) { $("#tab-members").hidden = false; $("#tab-admin").hidden = false; $("#tab-research").hidden = false; }
+  if (d.owner) { ["#tab-members", "#tab-admin", "#tab-research", "#tab-today5"].forEach((s) => $(s).hidden = false); }
 }).catch(() => { });
 $("#logout-btn").addEventListener("click", async () => {
   try { await api("/auth/logout", { method: "POST" }); } catch { }
@@ -728,6 +728,54 @@ async function viewStatus() {
     <div class="card"><h3>Recent errors</h3>${Object.entries(pr.prices.recent_errors).map(([k, v]) => `<div class="small"><b>${esc(k)}</b> ${esc(v.error)} <span class="dim">${ago(v.ts)}</span></div>`).join("") + s.background.errors.map((e) => `<div class="small"><b>${esc(e.where)}</b> ${esc(e.error)} <span class="dim">${ago(e.ts)}</span></div>`).join("") || '<div class="dim small">None.</div>'}</div></div>`;
 }
 
+// ------------------------------------------------------------------ today's intraday 5 (owner)
+async function viewToday5() {
+  const my = state.route;
+  app.innerHTML = `<div class="loading"><span class="spinner"></span> Scanning NIFTY 50 (about 30 seconds the first time)…</div>`;
+  const load = async () => {
+    const d = await api("/today5");
+    if (my !== state.route || !app) return;
+    const m = d.market;
+    const banner = d.is_today && m.open && d.window_open
+      ? `<div class="notice-line">Live session (delayed prices) · scan ${esc(d.scan_finished_ist || "")} · refreshes every minute</div>`
+      : d.is_today && m.open
+      ? `<div class="notice-line sim">The entry window (09:30–14:45) is closed. No new intraday buys now; close open trades by 15:15. Shown for reference.</div>`
+      : `<div class="notice-line sim">${m.open ? "Waiting for today's opening range (forms 09:15–09:30)." : "Market is closed."}
+          These are from the <b>last session (${esc(d.session || "–")})</b>, for reference only. A fresh list appears after 09:30 on the next trading day.</div>`;
+    const card = (p, i) => `<div class="t5-card">
+      <div class="row between"><div class="row"><span class="t5-rank">${i + 1}</span>
+        <div><a href="#/stock/${esc(p.symbol)}?mode=intraday"><b class="t5-sym">${esc(p.symbol)}</b></a><div class="dim small">${esc(p.name || "")}</div></div></div>
+        <div style="text-align:right"><div class="t5-price">${fmt(p.price)}</div><div class="small ${cls(p.change_pct)}">${pct(p.change_pct)}</div></div></div>
+      <div class="row" style="margin:12px 0"><span class="exit-pill ${p.state === "BUY ZONE" ? "d-TRADE" : p.state === "WAIT FOR BREAKOUT" ? "d-WAIT" : "r-na"}">${p.state === "BUY ZONE" ? "BUY ZONE NOW" : esc(p.state)}</span>
+        <span class="rating ${p.rating === "STRONG BULLISH" ? "r-strong" : "r-bull"}">${esc(p.rating)}</span><span class="dim small">R:R ${fmt(p.reward_risk, 2)}</span></div>
+      <div class="t5-steps">
+        <div class="t5-step buy"><b>When to buy</b><span>${p.state === "BUY ZONE"
+          ? `Breakout confirmed. Buy only between <b>₹${fmt(p.entry)}</b> and <b>₹${fmt(p.entry_high || p.entry)}</b>. Above that, don't chase.`
+          : `Only if a <b>5-minute candle closes above ₹${fmt(p.entry)}</b> (top of the opening range), between 09:30 and 14:45.`}</span></div>
+        <div class="t5-step stop"><b>Sell if it falls (stop-loss)</b><span>at <b>₹${fmt(p.stop)}</b>. Exit at once; never lower the stop.</span></div>
+        <div class="t5-step tgt"><b>Sell for profit (target)</b><span>Target 1 <b>₹${fmt(p.target1)}</b>${p.target2 ? ` · Target 2 ₹${fmt(p.target2)}` : ""}. At Target 1, book at least half and move the stop to your buy price.</span></div>
+        <div class="t5-step time"><b>Sell by time</b><span>Close everything by <b>15:15</b>, whatever happens.</span></div>
+      </div>
+      <div class="small muted" style="margin-top:10px">${p.qty_1l ? `On a ₹1,00,000 account risking 1%: about <b>${p.qty_1l}</b> shares, max loss ≈ ₹${fmt(p.max_loss_1l, 0)}. ` : ""}
+        ${p.why.length ? "Signals: " + p.why.map(esc).join(", ") + "." : ""}</div>
+    </div>`;
+    app.innerHTML = `<div class="grid"><div class="card spanall">
+        <div class="row between"><div><h3 style="margin:0">Today's intraday 5 <span class="sub">NIFTY 50 · opening-range breakout · only you can see this</span></h3>
+          <div class="muted small" style="margin-top:6px">Ranked from ${d.scanned} stocks. Only stocks with a complete long plan (bullish, entry above stop, reward:risk ≥ 1.5) whose price is still at or below the entry range qualify, so there may be fewer than 5.
+            ${d.moved ? `<b>${d.moved}</b> other plan${d.moved > 1 ? "s" : ""} already moved past the entry or target and ${d.moved > 1 ? "are" : "is"} left out: don't chase.` : ""}</div></div>
+          <button class="btn sm" id="t5-refresh">Refresh</button></div>
+        ${banner}</div>
+      ${d.picks.length ? `<div class="t5-grid">${d.picks.map(card).join("")}</div>`
+        : `<div class="card spanall"><div class="empty"><b>NO TRADE: insufficient edge.</b><br>No NIFTY 50 stock has a complete intraday plan right now. Not trading is a valid decision.</div></div>`}
+      <div class="card spanall small muted">⚠️ These intraday rules are <b>not yet validated</b>: live accuracy is being measured by the ₹5,000 test and the Predictions tracker (Admin). Prices are Yahoo's delayed data. Paper trade first; this is not investment advice.</div>
+    </div>`;
+    $("#t5-refresh").onclick = () => viewToday5();
+  };
+  try { await load(); } catch (e) { app.innerHTML = errorBox(e); return; }
+  every(60000, async () => { if (my === state.route && cal_open()) { try { await load(); } catch { } } });
+}
+function cal_open() { const t = $("#mkt-pill"); return t && /open/i.test(t.textContent) && !/closed/i.test(t.textContent); }
+
 // ------------------------------------------------------------------ research lab (owner only)
 const rs = { cohort: null, kind: "live", h: 7 };
 const DIR_CLS = { Bullish: "d-TRADE", Bearish: "d-NO", Sideways: "d-WAIT" };
@@ -1249,6 +1297,7 @@ async function route() {
       case "members": return await viewMembers();
       case "admin": return await viewAdmin();
       case "research": return await viewResearch();
+      case "today5": return await viewToday5();
       case "stock": return await viewStock(decodeURIComponent(parts[1] || ""));
       default: return await viewToday();
     }
