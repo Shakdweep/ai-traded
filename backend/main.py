@@ -4,6 +4,8 @@ Run:  .venv/Scripts/python -m backend   (or: uvicorn backend.main:app)
 """
 
 import asyncio
+import urllib.request
+import os
 import datetime
 import threading
 import time
@@ -33,6 +35,23 @@ def _log_err(where, e):
 
 _bot_thread = None
 _research_daily_done = {}
+KEEPALIVE_EVERY = 10 * 60   # Render's free plan sleeps after ~15 min without inbound traffic
+
+
+def _keepalive():
+    """On Render, visit our own public URL so the free instance never sleeps (the paper bot and
+    everyone's stops/alerts need it awake). RENDER_EXTERNAL_URL is set by Render; MoneyMittar is
+    on a paid plan / separate account, so these free hours aren't shared with it."""
+    base = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not base or time.time() - (_bg.get("last_keepalive") or 0) < KEEPALIVE_EVERY:
+        return
+    try:
+        req = urllib.request.Request(base + "/robots.txt", headers={"User-Agent": "ai-traded-keepalive"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            _bg["keepalive_status"] = r.status
+    except Exception as e:  # noqa: BLE001 - try again next cycle
+        _bg["keepalive_status"] = "error: %s" % type(e).__name__
+    _bg["last_keepalive"] = time.time()
 
 
 def _start_bot_if_due():
@@ -64,6 +83,7 @@ def _background_loop():
     next_scan = next_news = next_intra = 0
     while True:
         try:
+            _keepalive()
             _start_bot_if_due()
             _research_daily_if_missed()
         except Exception as e:  # noqa: BLE001
