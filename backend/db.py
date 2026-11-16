@@ -150,6 +150,8 @@ MIGRATIONS = [
     ("signals", "stop", "REAL"),
     ("signals", "target1", "REAL"),
     ("signals", "target2", "REAL"),
+    ("bot_accounts", "runner", "TEXT"),
+    ("bot_accounts", "lease_until", "REAL"),
 ]
 POST_MIGRATION = """
 CREATE INDEX IF NOT EXISTS alerts_owner ON alerts(owner, ts);

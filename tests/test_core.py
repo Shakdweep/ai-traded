@@ -969,8 +969,8 @@ class TestIntradayBot(unittest.TestCase):
         for t in ("bot_accounts", "bot_trades", "bot_days", "bot_events"):
             db.x("DELETE FROM %s" % t)
         self.saved = (bot.time, bot.services.run_scan, bot._bars5)
-        self.day = datetime.date(2026, 11, 16)
-        self.clock = self.Clock(datetime.datetime(2026, 11, 16, 9, 25, tzinfo=cal.IST))
+        self.day = datetime.date(2026, 11, 17)
+        self.clock = self.Clock(datetime.datetime(2026, 11, 17, 9, 25, tzinfo=cal.IST))
         bot.time = self.clock
 
     def tearDown(self):
@@ -978,7 +978,7 @@ class TestIntradayBot(unittest.TestCase):
 
     def bars(self, path):
         """5-minute bars from 09:15; path(i, t) -> (o, h, l, c)."""
-        t0 = int(datetime.datetime(2026, 11, 16, 9, 15, tzinfo=cal.IST).timestamp())
+        t0 = int(datetime.datetime(2026, 11, 17, 9, 15, tzinfo=cal.IST).timestamp())
         out = []
         for i in range(75):
             o, h, l, c = path(i, t0 + 300 * i)
@@ -997,7 +997,7 @@ class TestIntradayBot(unittest.TestCase):
     def test_target_trade_and_day_summary(self):
         b = self.bot
         b.services.run_scan = self.scan_from((10, 0))
-        ten30 = datetime.datetime(2026, 11, 16, 10, 30, tzinfo=cal.IST).timestamp()
+        ten30 = datetime.datetime(2026, 11, 17, 10, 30, tzinfo=cal.IST).timestamp()
         b._bars5 = lambda sym: self.bars(lambda i, t: (100, 102.5, 99.8, 101) if t >= ten30 else (100, 100.4, 99.6, 100))
         b.run(now_fn=self.clock.now)
         tr = b.trades()
@@ -1030,7 +1030,7 @@ class TestIntradayBot(unittest.TestCase):
     def test_stop_and_square_off(self):
         b = self.bot
         b.services.run_scan = self.scan_from((10, 0))
-        ten30 = datetime.datetime(2026, 11, 16, 10, 30, tzinfo=cal.IST).timestamp()
+        ten30 = datetime.datetime(2026, 11, 17, 10, 30, tzinfo=cal.IST).timestamp()
         b._bars5 = lambda sym: self.bars(lambda i, t: (98.8, 99.2, 98.5, 98.9) if t >= ten30 else (100, 100.4, 99.6, 100))
         b.run(now_fn=self.clock.now)
         t = b.trades()[0]
@@ -1040,7 +1040,7 @@ class TestIntradayBot(unittest.TestCase):
         # a flat day with no target or stop: closed at the square-off time
         for tb in ("bot_trades", "bot_days", "bot_events"):
             db.x("DELETE FROM %s" % tb)
-        self.clock = self.Clock(datetime.datetime(2026, 11, 16, 9, 25, tzinfo=cal.IST))
+        self.clock = self.Clock(datetime.datetime(2026, 11, 17, 9, 25, tzinfo=cal.IST))
         b.time = self.clock
         b.services.run_scan = self.scan_from((14, 30))
         b._bars5 = lambda sym: self.bars(lambda i, t: (100, 100.4, 99.6, 100.2))
@@ -1054,7 +1054,24 @@ class TestIntradayBot(unittest.TestCase):
         b.services.run_scan = lambda *a, **k: self.fail("must not scan outside the test days")
         sat = self.Clock(datetime.datetime(2026, 11, 21, 10, 0, tzinfo=cal.IST))
         self.assertIn("holiday or weekend", b.run(now_fn=sat.now))
-        after = self.Clock(datetime.datetime(2026, 11, 23, 10, 0, tzinfo=cal.IST))
+        after = self.Clock(datetime.datetime(2026, 11, 25, 10, 0, tzinfo=cal.IST))
         self.assertIn("Not a test day", b.run(now_fn=after.now))
         self.assertEqual(db.q("SELECT status FROM bot_accounts", one=True)["status"], "finished")
-        self.assertEqual(b.trading_days_of_test()[0].isoformat(), "2026-11-16")
+        self.assertEqual([d.isoformat() for d in b.trading_days_of_test()],
+                         ["2026-11-17", "2026-11-18", "2026-11-19", "2026-11-20", "2026-11-23"])
+
+    def test_single_runner_lease_and_resume(self):
+        b = self.bot
+        b.ensure_account()
+        self.assertTrue(b.acquire_lease())
+        db.x("UPDATE bot_accounts SET runner='github-runner', lease_until=? WHERE id=?", (self.clock.t + 300, b.ACCOUNT))
+        self.assertFalse(b.acquire_lease())                       # someone else holds it
+        self.assertIn("Another runner", b.run(now_fn=self.clock.now))
+        self.clock.t += 400                                        # their lease expired
+        self.assertTrue(b.acquire_lease())
+        b.release_lease()
+        b.services.run_scan = lambda *a, **k: {"rows": []}
+        b._bars5 = lambda sym: self.bars(lambda i, t: (100, 100.4, 99.6, 100))
+        self.assertEqual(b.run(now_fn=self.clock.now), "day done")
+        self.assertTrue(b.day_closed(datetime.date(2026, 11, 17)))
+        self.assertIn("already closed", b.run(now_fn=self.clock.now))  # a late backup run does nothing

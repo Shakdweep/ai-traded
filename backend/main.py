@@ -4,6 +4,7 @@ Run:  .venv/Scripts/python -m backend   (or: uvicorn backend.main:app)
 """
 
 import asyncio
+import datetime
 import threading
 import time
 import traceback
@@ -30,10 +31,43 @@ def _log_err(where, e):
     traceback.print_exc()
 
 
+_bot_thread = None
+_research_daily_done = {}
+
+
+def _start_bot_if_due():
+    """Run today's Rs 5,000 paper-bot session here if it's due and no other runner holds it
+    (GitHub Actions is the backup; the database lease prevents double trading)."""
+    global _bot_thread
+    from .bot import intraday as bot
+    if (_bot_thread and _bot_thread.is_alive()) or not bot.should_run():
+        return
+    _bot_thread = threading.Thread(target=bot.run, daemon=True, name="intraday-bot")
+    _bot_thread.start()
+
+
+def _research_daily_if_missed():
+    """After 19:30 IST on a trading day, run the research 'daily' job here if GitHub didn't."""
+    now = cal.now_ist()
+    day = now.date().isoformat()
+    if not cal.is_trading_day(now.date()) or now.time() < datetime.time(19, 30) or _research_daily_done.get(day):
+        return
+    ran = db.q("SELECT 1 AS x FROM data_runs WHERE job='daily' AND status='ok' AND finished_at > ?",
+               (datetime.datetime.combine(now.date(), datetime.time(18, 0), cal.IST).timestamp(),), one=True)
+    _research_daily_done[day] = True
+    if not ran:
+        rjobs.start("daily")
+
+
 def _background_loop():
     """Refresh news, scans, alerts and paper positions on a market-aware cadence."""
     next_scan = next_news = next_intra = 0
     while True:
+        try:
+            _start_bot_if_due()
+            _research_daily_if_missed()
+        except Exception as e:  # noqa: BLE001
+            _log_err("bot/research", e)
         try:
             now = time.time()
             st = cal.market_status()

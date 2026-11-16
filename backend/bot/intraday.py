@@ -18,7 +18,12 @@ Rules (the same opening-range breakout plan the Intraday tab shows):
     SEBI, stamp, GST).
 Prices are Yahoo's delayed 5-minute data, so real fills would differ.
 
-Run by GitHub Actions on trading days (.github/workflows/intraday-bot.yml):
+Who runs it: the website itself during market hours (backend/main.py background loop),
+with GitHub Actions as a backup (.github/workflows/intraday-bot.yml). A database lease makes
+sure only ONE runner trades at a time; if a runner dies, its lease expires in 10 minutes
+and the other takes over, resuming open trades from the last checked candle.
+
+Command line:
   python -m backend.bot.intraday run        # trade today's session, 09:25-15:20 IST
   python -m backend.bot.intraday status     # print the account
 """
@@ -26,6 +31,8 @@ Run by GitHub Actions on trading days (.github/workflows/intraday-bot.yml):
 import datetime
 import json
 import math
+import os
+import socket
 import sys
 import time
 import traceback
@@ -37,12 +44,15 @@ from ..market import yahoo
 
 ACCOUNT = "intraday-5k"
 CONFIG = {
-    "name": "₹5,000 intraday test", "capital": 5000.0, "start_date": "2026-11-16", "trading_days": 5,
+    "name": "₹5,000 intraday test", "capital": 5000.0, "start_date": "2026-11-17", "trading_days": 5,
     "universe": "nifty50", "risk_per_trade_pct": 1.0, "max_open": 1, "max_trades_per_day": 3,
     "daily_loss_limit_pct": 2.0, "slippage_pct": 0.05, "chase_limit_r": 0.15, "leverage": 5,
     "no_entry_before": "09:30", "no_entry_after": "14:45", "flat_by": "15:15",
 }
 CYCLE_SECONDS = 300
+RUNNER = "%s-%d" % (socket.gethostname(), os.getpid())
+LEASE_SECONDS = 600       # a runner that stops renewing loses the lease after 10 minutes
+WAKE_FROM, WAKE_TO = datetime.time(9, 20), datetime.time(15, 20)
 BAR_DELAY = 75           # wait this long after a 5-min candle closes before reading it (Yahoo delay)
 
 
@@ -54,8 +64,8 @@ def ensure_account():
          (ACCOUNT, CONFIG["name"], CONFIG["capital"], CONFIG["start_date"], CONFIG["trading_days"],
           json.dumps(CONFIG), time.time(), "scheduled"))
     # rules can still change until the test starts; after that they're frozen with its history
-    db.x("UPDATE bot_accounts SET config=?, name=? WHERE id=? AND status='scheduled'",
-         (json.dumps(CONFIG), CONFIG["name"], ACCOUNT))
+    db.x("UPDATE bot_accounts SET config=?, name=?, start_date=?, trading_days=? WHERE id=? AND status='scheduled'",
+         (json.dumps(CONFIG), CONFIG["name"], CONFIG["start_date"], CONFIG["trading_days"], ACCOUNT))
     return db.q("SELECT * FROM bot_accounts WHERE id=?", (ACCOUNT,), one=True)
 
 
@@ -260,6 +270,36 @@ def close_stale(today):
                         "squared off at that day's close (the runner had stopped)")
 
 
+def acquire_lease():
+    """Take or renew the single-runner lease. True if this process may trade."""
+    now = time.time()
+    db.x("UPDATE bot_accounts SET runner=?, lease_until=? WHERE id=? AND "
+         "(runner IS NULL OR runner=? OR lease_until IS NULL OR lease_until < ?)",
+         (RUNNER, now + LEASE_SECONDS, ACCOUNT, RUNNER, now))
+    row = db.q("SELECT runner FROM bot_accounts WHERE id=?", (ACCOUNT,), one=True)
+    return bool(row) and row["runner"] == RUNNER
+
+
+def release_lease():
+    db.x("UPDATE bot_accounts SET lease_until=0 WHERE id=? AND runner=?", (ACCOUNT, RUNNER))
+
+
+def day_closed(day):
+    row = db.q("SELECT end_equity FROM bot_days WHERE account=? AND day=?", (ACCOUNT, str(day)), one=True)
+    return bool(row) and row["end_equity"] is not None
+
+
+def should_run(now=None):
+    """For the website's background loop: is it time to (re)start today's session here?"""
+    now = now or cal.now_ist()
+    if not WAKE_FROM <= now.time() <= WAKE_TO or now.date() not in trading_days_of_test():
+        return False
+    if day_closed(now.date()):
+        return False
+    row = db.q("SELECT runner, lease_until FROM bot_accounts WHERE id=?", (ACCOUNT,), one=True)
+    return not row or not row["lease_until"] or row["lease_until"] < time.time() or row["runner"] == RUNNER
+
+
 def run(now_fn=None):
     now_fn = now_fn or cal.now_ist
     db.db()
@@ -273,10 +313,18 @@ def run(now_fn=None):
         if today > days[-1] and acct["status"] != "finished":
             db.x("UPDATE bot_accounts SET status='finished' WHERE id=?", (ACCOUNT,))
         return msg
+    if day_closed(today):
+        return "Today's session is already closed."
+    if now_fn().time() >= _hhmm(CONFIG["flat_by"]) and not trades(day=today.isoformat()):
+        return "Too late to start today's session."
+    if not acquire_lease():
+        return "Another runner is trading this session."
     db.x("UPDATE bot_accounts SET status='running' WHERE id=?", (ACCOUNT,))
     close_stale(today)
+    resumed = db.q("SELECT 1 AS x FROM bot_days WHERE account=? AND day=?", (ACCOUNT, today.isoformat()), one=True)
     start_day(today)
-    log("start", "Day %d of %d. Balance ₹%.2f. Rules: %s" % (days.index(today) + 1, len(days), balances()["equity"],
+    log("resume" if resumed else "start", "%sDay %d of %d (runner %s). Balance ₹%.2f. Rules: %s" % (
+        "Resumed: " if resumed else "", days.index(today) + 1, len(days), RUNNER, balances()["equity"],
         "ORB on NIFTY 50, 1 position, max 3 trades, 1%% max loss per trade, stop at 2%% day loss, entries "
         "09:30-14:45, flat 15:15, %gx leverage" % CONFIG["leverage"]))
     entry_from, entry_to, flat = _hhmm(CONFIG["no_entry_before"]), _hhmm(CONFIG["no_entry_after"]), _hhmm(CONFIG["flat_by"])
@@ -285,6 +333,9 @@ def run(now_fn=None):
         now = now_fn()
         t = now.time()
         flat_now = t >= flat
+        if not acquire_lease():  # another runner took over (this one was too slow): stop cleanly
+            log("info", "Lease lost to another runner; this runner stops.")
+            return "lease lost"
         try:
             manage_exits(time.time(), flat_now)
             if not flat_now and entry_from <= t <= entry_to:
@@ -303,6 +354,7 @@ def run(now_fn=None):
         nxt = (math.floor(time.time() / CYCLE_SECONDS) + 1) * CYCLE_SECONDS + BAR_DELAY
         time.sleep(max(5, nxt - time.time()))
     end_day(today)
+    release_lease()
     if today == days[-1]:
         db.x("UPDATE bot_accounts SET status='finished' WHERE id=?", (ACCOUNT,))
     return "day done"
