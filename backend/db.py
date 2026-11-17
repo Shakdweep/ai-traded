@@ -26,7 +26,7 @@ USING_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
 # tables whose INSERTs return the new row id
 _ID_TABLES = {"signals", "alerts", "paper_orders", "paper_positions", "journal", "email_codes", "invites",
-              "data_runs", "cohorts", "predictions", "bot_trades", "bot_events"}
+              "data_runs", "cohorts", "predictions", "bot_trades", "bot_events", "strategy_reports"}
 
 # Whose data a request (or a background step) works on: the signed-in account id, or ""
 # on your own PC where there is no login. Set once per request by the login middleware.
@@ -114,6 +114,9 @@ CREATE TABLE IF NOT EXISTS outcomes (
   window_high REAL, window_low REAL, predicted_dir TEXT, actual_dir TEXT, dir_correct INTEGER, in_range INTEGER,
   abs_err REAL, pct_err REAL, support_held INTEGER, resistance_broken INTEGER, stop_hit INTEGER, nifty_ret_pct REAL,
   evaluated_at REAL, PRIMARY KEY (prediction_id, horizon));
+CREATE TABLE IF NOT EXISTS strategy_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, strategy TEXT NOT NULL, created_at REAL NOT NULL, verdict TEXT,
+  summary TEXT, report TEXT);
 CREATE TABLE IF NOT EXISTS bot_accounts (
   id TEXT PRIMARY KEY, name TEXT, start_capital REAL NOT NULL, start_date TEXT, trading_days INTEGER, config TEXT,
   created_at REAL, status TEXT);

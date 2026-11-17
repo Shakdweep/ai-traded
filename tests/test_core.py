@@ -1104,3 +1104,54 @@ class TestToday5(unittest.TestCase):
         self.assertEqual(len(services.today5(many, {})[0]), 5)
         closed, _ = services.today5(many, {}, window_open=False)
         self.assertTrue(all(p["state"] == "ENTRY WINDOW CLOSED" for p in closed))
+
+
+class TestOrbBacktest(unittest.TestCase):
+    """The intraday ORB backtest mirrors the bot's rules on 5-minute bars."""
+
+    def session(self, path, day=datetime.date(2026, 11, 17)):
+        t0 = int(datetime.datetime.combine(day, datetime.time(9, 15), cal.IST).timestamp())
+        return [dict(zip("ohlc", path(i)), t=t0 + 300 * i, v=1000 + (5000 if i == 4 else 0)) for i in range(75)]
+
+    def up(self, i):
+        if i < 3:
+            return (100, 101, 99, 100)       # opening range 99-101, mid 100
+        if i == 4:
+            return (100.5, 101.6, 100.4, 101.5)  # closes above the range high -> buy
+        if i == 20:
+            return (102, 105, 101.8, 104.5)  # reaches the 2R target
+        return (101.2, 101.6, 100.8, 101.3)
+
+    def test_breakout_target_stop_and_squareoff(self):
+        from backend.research import orb_backtest as ob
+        t = ob.simulate_day(self.session(self.up), {})
+        self.assertEqual((t["reason"], t["entry_time"]), ("target", "09:30"))  # the 09:30 candle (closes 09:35) is the first above the range
+        self.assertAlmostEqual(t["stop"], 100.0)
+        self.assertGreater(t["net"], 0)
+
+        def down(i):
+            return (99.5, 99.8, 99.0, 99.2) if i == 10 else (101.2, 101.6, 100.8, 101.3) if i == 20 else self.up(i)
+        self.assertEqual(ob.simulate_day(self.session(down), {})["reason"], "stop")
+
+        def flat(i):
+            return (101.2, 101.6, 100.8, 101.3) if i == 20 else self.up(i)
+        self.assertEqual(ob.simulate_day(self.session(flat), {})["reason"], "square-off")
+        self.assertIsNone(ob.simulate_day(self.session(flat), {"buffer_pct": 1.0}))   # breakout not strong enough
+        self.assertIsNone(ob.simulate_day(self.session(flat), {"max_or_pct": 1.0}))   # range 2% wide: skipped
+        self.assertEqual(ob.simulate_day(self.session(flat), {"stop_mode": "low"})["stop"], 99.0)
+        self.assertEqual(ob.simulate_day(self.session(flat), {"time_stop_bars": 6})["reason"], "time stop")
+
+    def test_index_filter_and_verdict(self):
+        from backend.research import orb_backtest as ob
+        idx_down = self.session(lambda i: (200 - i, 200 - i, 199 - i, 199 - i))
+        idx_up = self.session(lambda i: (200 + i, 201 + i, 200 + i, 201 + i))
+        for b in idx_down + idx_up:
+            b["v"] = 0  # Yahoo gives indices no volume
+        self.assertIsNone(ob.simulate_day(self.session(self.up), {"index_filter": True}, idx_down))
+        self.assertIsNotNone(ob.simulate_day(self.session(self.up), {"index_filter": True}, idx_up))
+        res = {"variants": {
+            "a": {"first": {"avg_net_r": 0.1}, "second": {"trades": 150, "avg_net_r": 0.08, "profit_factor": 1.3}},
+            "b": {"first": {"avg_net_r": -0.2}, "second": {"trades": 500, "avg_net_r": 0.5, "profit_factor": 3}}}}
+        self.assertEqual(ob.verdict(res)[:2], ("APPROVED", "a"))   # chosen on the first half only
+        res["variants"]["a"]["second"]["avg_net_r"] = -0.01
+        self.assertEqual(ob.verdict(res)[0], "REJECTED")

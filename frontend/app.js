@@ -767,7 +767,12 @@ async function viewToday5() {
         ${banner}</div>
       ${d.picks.length ? `<div class="t5-grid">${d.picks.map(card).join("")}</div>`
         : `<div class="card spanall"><div class="empty"><b>NO TRADE: insufficient edge.</b><br>No NIFTY 50 stock has a complete intraday plan right now. Not trading is a valid decision.</div></div>`}
-      <div class="card spanall small muted">⚠️ These intraday rules are <b>not yet validated</b>: live accuracy is being measured by the ₹5,000 test and the Predictions tracker (Admin). Prices are Yahoo's delayed data. Paper trade first; this is not investment advice.</div>
+      ${d.validation ? `<div class="card spanall t5-verdict ${d.validation.verdict === "APPROVED" ? "ok" : "bad"}">
+          <b>${d.validation.verdict === "APPROVED" ? "✅ Strategy passed its backtest" : "⛔ Strategy FAILED its backtest: no proven edge"}</b>
+          <div class="small" style="margin-top:6px">${esc(d.validation.summary)} Tested on the last ~60 days of NIFTY 50 5-minute data, including Indian intraday charges
+            (${new Date(d.validation.created_at * 1000).toLocaleDateString("en-IN")}). ${d.validation.verdict === "APPROVED" ? "" : "Use this list for paper practice only."}</div></div>`
+        : `<div class="card spanall small muted">⚠️ These intraday rules haven't been backtested yet (Research → History tools → "Test intraday rules").</div>`}
+      <div class="card spanall small muted">Live accuracy is also measured by the ₹5,000 test and the Predictions tracker (Admin). Prices are Yahoo's delayed data. Not investment advice.</div>
     </div>`;
     $("#t5-refresh").onclick = () => viewToday5();
   };
@@ -812,9 +817,9 @@ async function viewResearch() {
         <div><span>Prediction integrity</span><b class="small ${ov.integrity.changed.length ? "down" : "up"}">${ov.integrity.changed.length ? ov.integrity.changed.length + " changed!" : `${ov.integrity.checked} checked, none changed`}</b></div>
         <div><span>Data quality</span><b class="small ${q.ok ? "up" : "down"}">${q.ok ? "no gaps found" : esc((q.issues[0] || {}).detail || q.message || "issues")}</b></div>
       </div>
-      <div style="margin-top:14px">${runLine("daily", "Daily update")}${runLine("weekly", "Weekly 10")}${runLine("simulate", "Simulation")}${runLine("backfill", "History load")}</div>
+      <div style="margin-top:14px">${runLine("orb_test", "Intraday backtest")}${runLine("daily", "Daily update")}${runLine("weekly", "Weekly 10")}${runLine("simulate", "Simulation")}${runLine("backfill", "History load")}</div>
       <details style="margin-top:12px"><summary class="small muted">History tools (normally run by GitHub Actions)</summary>
-        <div class="row" style="margin-top:10px">${jobBtn("backfill", "Load 2 years of official data")}${jobBtn("simulate", "Replay past 52 Mondays (simulated)")}
+        <div class="row" style="margin-top:10px">${jobBtn("backfill", "Load 2 years of official data")}${jobBtn("simulate", "Replay past 52 Mondays (simulated)")}${jobBtn("orb_test", "Test intraday rules (60-day backtest)")}
         <span class="dim small">Heavy jobs: on Render's free server they can take a long time or stop if the site goes to sleep.</span></div></details>
     </div>
     <div id="rs-cohort"></div>

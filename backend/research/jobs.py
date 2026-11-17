@@ -152,7 +152,15 @@ def simulate(weeks=52):
     return msg
 
 
-JOBS = {"daily": daily, "weekly": weekly, "backfill": backfill, "simulate": simulate}
+def orb_test():
+    t0 = time.time()
+    from . import orb_backtest
+    msg = orb_backtest.run_and_store()
+    data.log_run("orb_test", "ok", 1, msg, t0)
+    return msg
+
+
+JOBS = {"daily": daily, "weekly": weekly, "backfill": backfill, "simulate": simulate, "orb_test": orb_test}
 
 
 def _progress(job, i, n):

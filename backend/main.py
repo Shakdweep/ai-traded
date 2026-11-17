@@ -364,7 +364,11 @@ async def today5(request: Request):
     now = cal.now_ist()
     window = st["open"] and datetime.time(9, 30) <= now.time() <= datetime.time(14, 45)
     picks, moved = services.today5(rows, st, window_open=window)
+    from .research import orb_backtest
+    rep = await run(orb_backtest.latest_report)
+    validation = {"verdict": rep["verdict"], "summary": rep["summary"], "created_at": rep["created_at"]} if rep else None
     return {"picks": picks, "moved": moved, "window_open": window, "scanned": len(rows), "market": st,
+            "validation": validation,
             "session": session, "is_today": session == cal.now_ist().date().isoformat(),
             "scan_finished_ist": res.get("finished_ist"), "running": bool(res.get("running")),
             "now_ist": cal.now_ist().strftime("%H:%M:%S IST"),

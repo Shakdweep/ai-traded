@@ -244,3 +244,5 @@ footer { color: var(--dim); font-size: 12.5px; line-height: 1.7; padding: 40px 2
 .t5-step b:first-child { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
 .t5-step.buy { border-left-color: var(--bull); } .t5-step.stop { border-left-color: var(--bear); }
 .t5-step.tgt { border-left-color: var(--info); } .t5-step.time { border-left-color: var(--warn); }
+.t5-verdict.bad { border-color: var(--bear); background: var(--bear-bg); }
+.t5-verdict.ok { border-color: var(--bull); background: var(--bull-bg); }
