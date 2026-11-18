@@ -46,13 +46,17 @@ def daily(lookback_days=14):
         n_bulk = data.load_bulk_deals()
     except data.DataUnavailable as e:
         n_bulk, ix_err = 0, ix_err + [str(e)]
+    try:
+        n_5m, bad_5m = data.collect_intraday()
+    except Exception as e:  # noqa: BLE001
+        n_5m, bad_5m, ix_err = 0, 0, ix_err + ["5-min collect: %s" % type(e).__name__]
     pending = {r["symbol"] for r in db.q(  # only stocks whose predictions still have horizons to score
         "SELECT DISTINCT p.symbol FROM predictions p WHERE (SELECT COUNT(*) FROM outcomes o "
         "WHERE o.prediction_id = p.id) < ?", (len(model.HORIZONS),))}
     st = features.Store(pending if len(pending) <= 60 else None)
     scored = evaluate.evaluate_pending(st)
-    msg = "official days loaded %d, unavailable %d, index bars %d, bulk deals %d, outcomes scored %d" % (
-        loaded, len(missing), n_ix, n_bulk, scored)
+    msg = "official days loaded %d, unavailable %d, index bars %d, bulk deals %d, 5-min bars saved %d, outcomes scored %d" % (
+        loaded, len(missing), n_ix, n_bulk, n_5m, scored)
     if missing or ix_err:
         msg += " | " + "; ".join((missing + ix_err)[:4])
     data.log_run("daily", "ok", loaded + scored, msg, t0)

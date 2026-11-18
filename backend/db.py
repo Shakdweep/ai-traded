@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS daily_prices (
   symbol TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL NOT NULL, prev_close REAL,
   volume REAL, deliv_qty REAL, deliv_pct REAL, source TEXT NOT NULL, PRIMARY KEY (symbol, date));
 CREATE INDEX IF NOT EXISTS daily_prices_date ON daily_prices(date);
+CREATE TABLE IF NOT EXISTS intraday_bars (
+  symbol TEXT NOT NULL, t REAL NOT NULL, o REAL, h REAL, l REAL, c REAL NOT NULL, v REAL, PRIMARY KEY (symbol, t));
 CREATE TABLE IF NOT EXISTS bulk_deals (
   date TEXT NOT NULL, symbol TEXT NOT NULL, client TEXT NOT NULL, side TEXT NOT NULL, qty REAL, price REAL,
   PRIMARY KEY (date, symbol, client, side, qty, price));

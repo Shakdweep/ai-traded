@@ -207,6 +207,14 @@ def run(symbol_charts, variants=None, index_chart=None):
     return out
 
 
+def merge_bars(*lists):
+    by = {}
+    for bars in lists:
+        for b in bars:
+            by[int(b["t"])] = b
+    return [by[t] for t in sorted(by)]
+
+
 def verdict(res):
     """APPROVED only if the best variant chosen on the FIRST half is profitable after costs on the SECOND
     half with a profit factor above 1.2 and at least 100 trades; otherwise REJECTED."""
@@ -223,10 +231,17 @@ def run_and_store():
     import time
     from .. import db
     from ..market import universe, yahoo
+    from . import data as rdata
     syms = [s["symbol"] for s in universe.constituents("nifty50")["stocks"]]
     charts, bad = yahoo.charts([yahoo.to_yahoo(s) for s in syms], "60d", "5m")
     nifty = yahoo.chart("^NSEI", "60d", "5m")["bars"]
     data = {yahoo.plain(k): v["bars"] for k, v in charts.items()}
+    try:   # our own saved history (grows every day) + the fresh 60 days
+        stored = rdata.stored_intraday(set(syms) | {"^NSEI"})
+    except Exception:  # noqa: BLE001
+        stored = {}
+    data = {s: merge_bars(stored.get(s, []), data.get(s, [])) for s in set(data) | (set(stored) - {"^NSEI"})}
+    nifty = merge_bars(stored.get("^NSEI", []), nifty)
     res = run(data, dict(VARIANTS, **VARIANTS_2), nifty)
     res["fetch_errors"] = len(bad)
     v, best, s = verdict(res)

@@ -185,6 +185,51 @@ def _completed(bars):
     return completed_daily(bars)
 
 
+INTRADAY_SYMBOLS_INDEX = "^NSEI"
+
+
+def _session_complete(day):
+    """A session's 5-min bars are final once the market has closed that day."""
+    now = cal.now_ist()
+    return day < now.date() or (day == now.date() and now.time() >= datetime.time(15, 35))
+
+
+def save_intraday(charts):
+    """charts: {plain symbol: [5-min bars]} -> rows saved (only finished sessions; duplicates ignored)."""
+    rows = []
+    for sym, bars in charts.items():
+        for b in bars:
+            if b.get("c") is None or not _session_complete(cal.to_ist(b["t"]).date()):
+                continue
+            rows.append((sym, float(b["t"]), b.get("o"), b.get("h"), b.get("l"), b["c"], b.get("v") or 0))
+    if rows:
+        db.xmany("INSERT INTO intraday_bars(symbol, t, o, h, l, c, v) VALUES(?,?,?,?,?,?,?) "
+                 "ON CONFLICT(symbol, t) DO NOTHING", rows)
+    return len(rows)
+
+
+def collect_intraday():
+    """Save NIFTY 50 stocks' + NIFTY's 5-minute bars to our own database every day, so the intraday
+    backtest is not limited to the ~60 days Yahoo keeps. First run backfills those 60 days."""
+    have = db.q("SELECT COUNT(*) AS n FROM intraday_bars", one=True)["n"]
+    rng = "5d" if have else "60d"
+    syms = [s["symbol"] for s in universe.constituents("nifty50")["stocks"]]
+    ch, bad = yahoo.charts([yahoo.to_yahoo(s) for s in syms] + [INTRADAY_SYMBOLS_INDEX], rng, "5m")
+    charts = {(k if k == INTRADAY_SYMBOLS_INDEX else yahoo.plain(k)): v["bars"] for k, v in ch.items()}
+    return save_intraday(charts), len(bad)
+
+
+def stored_intraday(symbols=None):
+    """{symbol: [5-min bars in time order]} from our own store."""
+    sql = "SELECT symbol, t, o, h, l, c, v FROM intraday_bars"
+    out = {}
+    for r in db.q(sql + " ORDER BY symbol, t"):
+        if symbols is None or r["symbol"] in symbols:
+            out.setdefault(r["symbol"], []).append(
+                {"t": int(r["t"]), "o": r["o"], "h": r["h"], "l": r["l"], "c": r["c"], "v": r["v"]})
+    return out
+
+
 def load_bulk_deals():
     try:
         raw = _get(BULK_URL)

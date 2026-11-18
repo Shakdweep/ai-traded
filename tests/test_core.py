@@ -1155,3 +1155,19 @@ class TestOrbBacktest(unittest.TestCase):
         self.assertEqual(ob.verdict(res)[:2], ("APPROVED", "a"))   # chosen on the first half only
         res["variants"]["a"]["second"]["avg_net_r"] = -0.01
         self.assertEqual(ob.verdict(res)[0], "REJECTED")
+
+
+class TestIntradayStore(unittest.TestCase):
+    def test_save_dedupe_and_merge(self):
+        from backend.research import data as rdata, orb_backtest as ob
+        old = datetime.datetime(2026, 11, 10, 9, 15, tzinfo=cal.IST).timestamp()
+        bars = [{"t": int(old) + 300 * i, "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10} for i in range(3)]
+        future = {"t": int(cal.now_ist().timestamp()) + 86400 * 3, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}
+        db.x("DELETE FROM intraday_bars")
+        self.assertEqual(rdata.save_intraday({"TEST": bars + [future]}), 3)   # unfinished session skipped
+        rdata.save_intraday({"TEST": bars})                                   # duplicates ignored
+        got = rdata.stored_intraday({"TEST"})["TEST"]
+        self.assertEqual([b["t"] for b in got], [b["t"] for b in bars])
+        merged = ob.merge_bars(got, bars[1:] + [dict(bars[2], t=bars[2]["t"] + 300)])
+        self.assertEqual(len(merged), 4)
+        db.x("DELETE FROM intraday_bars")
