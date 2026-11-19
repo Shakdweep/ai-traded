@@ -945,7 +945,9 @@ function renderBot(r) {
         ${r.test_days.length} trading days from ${dayName(r.test_days[0])} to ${dayName(r.test_days[r.test_days.length - 1])}.
         One position at a time · max ${cfg.max_trades_per_day} trades a day · stops for the day after a ${cfg.daily_loss_limit_pct}% loss ·
         entries ${cfg.no_entry_before}–${cfg.no_entry_after} · everything closed by ${cfg.flat_by} ·
-        <b>${cfg.leverage || 1}x buying power</b> (up to ${inr((a.start_capital || 0) * (cfg.leverage || 1), 0)}), but each trade's loss at the stop is capped at ${cfg.risk_per_trade_pct}% incl. charges · real Indian intraday charges.</div></div></div>
+        <b>${cfg.leverage || 1}x buying power</b> (up to ${inr((a.start_capital || 0) * (cfg.leverage || 1), 0)}), but each trade's loss at the stop is capped at ${cfg.risk_per_trade_pct}% incl. charges · real Indian intraday charges.</div></div>
+      <div style="text-align:right;flex:none"><button class="btn sm" id="bot-refresh">↻ Refresh</button>
+        <div class="dim small" style="margin-top:4px">as of ${new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</div></div></div>
     <div class="acc-grid" style="margin-top:16px">
       <div class="acc-card"><div class="dim small">Balance now</div><div class="acc-big">${inr(b.equity, 2)}</div><div class="small muted">started with ${inr(a.start_capital, 0)}</div></div>
       <div class="acc-card"><div class="dim small">Return</div><div class="acc-big ${cls(r.return_pct)}">${pct(r.return_pct)}</div><div class="small muted">net ${inr(t.net, 2)} after charges</div></div>
@@ -972,6 +974,10 @@ function renderBot(r) {
         <span class="tag ${e.kind === "buy" ? "b" : e.kind === "sell" ? "w" : e.kind === "error" ? "s" : ""}">${esc(e.kind)}</span> ${esc(e.message)}</div>`).join("") || '<div class="dim">Nothing logged yet.</div>'}</div></details>
     <p class="dim small" style="margin-bottom:0">${esc(r.data_note)}</p>
   </div>`;
+  $("#bot-refresh").onclick = async (ev) => {
+    ev.target.disabled = true; ev.target.textContent = "Refreshing…";
+    try { renderBot(await api("/admin/bot")); } catch (e) { ev.target.disabled = false; ev.target.textContent = "↻ Refresh"; }
+  };
 }
 
 // ------------------------------------------------------------------ predictions: did they come true? (owner)
