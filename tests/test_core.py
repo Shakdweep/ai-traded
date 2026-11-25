@@ -1171,3 +1171,23 @@ class TestIntradayStore(unittest.TestCase):
         merged = ob.merge_bars(got, bars[1:] + [dict(bars[2], t=bars[2]["t"] + 300)])
         self.assertEqual(len(merged), 4)
         db.x("DELETE FROM intraday_bars")
+
+
+class TestSleepWatch(unittest.TestCase):
+    """While nobody is on the site, open paper positions are watched from memory (no database)."""
+
+    def test_due_without_db(self):
+        from backend import paper
+        open_t = datetime.datetime(2026, 11, 25, 10, 0, tzinfo=cal.IST)
+        at = lambda h, m: datetime.datetime(2026, 11, 25, h, m, tzinfo=cal.IST)  # noqa: E731 - a Wednesday
+        pos = {"owner": "a", "symbol": "X", "qty": 4, "stop": 95.0, "target1": 110.0, "target2": None,
+               "mode": "intraday", "opened_at": open_t.timestamp(), "flat_by": "15:15"}
+        paper.WATCH.update(positions=[pos], queued=False, loaded=True)
+        self.assertFalse(paper.due_without_db(lambda s: 100.0, at(11, 0)))   # nothing to do: stay asleep
+        self.assertTrue(paper.due_without_db(lambda s: 94.9, at(11, 0)))     # stop hit
+        self.assertTrue(paper.due_without_db(lambda s: 110.5, at(11, 0)))    # target hit
+        self.assertTrue(paper.due_without_db(lambda s: 100.0, at(15, 16)))   # intraday square-off due
+        self.assertFalse(paper.due_without_db(lambda s: 50.0, at(20, 0)))    # market closed
+        paper.WATCH.update(positions=[], queued=True)
+        self.assertTrue(paper.due_without_db(lambda s: 100.0, at(9, 30)))    # queued order can fill
+        paper.WATCH.update(positions=[], queued=False, loaded=False)

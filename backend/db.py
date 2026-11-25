@@ -229,22 +229,47 @@ def conn():
 
 
 _conn = None
+_schema_ready = False
+_last_used = 0.0
 
 
 def db():
-    global _conn
+    global _conn, _schema_ready, _last_used
     with _lock:
-        if _conn is None:
-            c = conn()
-            if USING_POSTGRES:
-                for stmt in filter(str.strip, pg_schema().split(";")):
-                    c.execute(stmt)
-            else:
-                c.executescript(SCHEMA)
-                c.commit()
-            _migrate(c)
+        _last_used = time.time()
+        if _conn is not None:
+            return _conn
+        c = conn()
+        if USING_POSTGRES and _schema_ready:   # reconnect after an idle close: schema already checked
             _conn = c
+            return _conn
+        if USING_POSTGRES:
+            for stmt in filter(str.strip, pg_schema().split(";")):
+                c.execute(stmt)
+        else:
+            c.executescript(SCHEMA)
+            c.commit()
+        _migrate(c)
+        _conn = c
+        _schema_ready = True
         return _conn
+
+
+def close_if_idle(seconds=90):
+    """Close the connection after `seconds` without queries so Neon's compute can go to sleep
+    (an open connection keeps it awake and billed). The next query reconnects by itself."""
+    global _conn
+    if not USING_POSTGRES:
+        return False
+    with _lock:
+        if _conn is None or time.time() - _last_used < seconds:
+            return False
+        try:
+            _conn.close()
+        except Exception:  # noqa: BLE001 - already gone
+            pass
+        _conn = None
+        return True
 
 
 def _migrate(c):

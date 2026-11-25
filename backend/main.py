@@ -25,7 +25,13 @@ from .market import universe, yahoo
 from .news import feeds
 
 WEB = config.ROOT / "frontend"
-_bg = {"last_scan": None, "last_news": None, "last_intraday": None, "errors": [], "cycles": 0}
+_bg = {"last_scan": None, "last_news": None, "last_intraday": None, "errors": [], "cycles": 0, "last_user": 0.0,
+       "db_wakes": 0}
+AWAKE_FOR = 300   # background jobs that use the database run only within 5 minutes of someone using the site
+
+
+def _someone_here(now=None):
+    return (now or time.time()) - _bg["last_user"] < AWAKE_FOR
 
 
 def _log_err(where, e):
@@ -78,9 +84,23 @@ def _research_daily_if_missed():
         rjobs.start("daily")
 
 
+def _mark_all(st, now):
+    """Check every person's open paper positions, then refresh the in-memory watch copy."""
+    flat_by = {}
+    for who in paper.active_owners():  # each person's own paper account
+        with db.as_owner(who):
+            s = db.get_settings()
+            flat_by[who] = s.get("intraday_flat_by")
+            paper.mark_to_market(s, notify=lambda sy, k, m: alerts.notify(sy, k, m, "caution"))
+    paper.snapshot(flat_by)
+
+
 def _background_loop():
-    """Refresh news, scans, alerts and paper positions on a market-aware cadence."""
-    next_scan = next_news = next_intra = 0
+    """Refresh news, scans, alerts and paper positions - but only while someone is using the site,
+    so Neon's database can sleep the rest of the time (it is billed per hour awake). While
+    nobody is here, open paper positions are still watched from memory (no database) and the
+    database is woken only when a stop/target/square-off is actually due."""
+    next_scan = next_news = next_intra = next_mtm = next_wake = 0
     while True:
         try:
             _keepalive()
@@ -91,11 +111,22 @@ def _background_loop():
         try:
             now = time.time()
             st = cal.market_status()
+            if not _someone_here(now):
+                if not paper.WATCH["loaded"]:
+                    paper.snapshot()
+                if now >= next_wake and paper.due_without_db():
+                    _bg["db_wakes"] += 1
+                    next_wake = now + 300
+                    next_mtm = 0
+                    _mark_all(st, now)
+                db.close_if_idle(90)
+                time.sleep(60)
+                continue
             if now >= next_news:
                 feeds.refresh()
                 alerts.evaluate_news(feeds.latest(hours=24))
                 _bg["last_news"] = now
-                next_news = now + config.NEWS_EVERY_MIN * 60
+                next_news = now + (config.NEWS_EVERY_MIN if st["open"] else config.NEWS_EVERY_MIN_CLOSED) * 60
             if now >= next_scan:
                 res = services.run_scan(config.BACKGROUND_UNIVERSE, "swing")
                 alerts.evaluate_scan(res.get("rows", []))
@@ -110,14 +141,16 @@ def _background_loop():
                 alerts.evaluate_scan(res.get("rows", []))
                 _bg["last_intraday"] = now
                 next_intra = now + 5 * 60
-            if st["open"] or st["state"] == "closed":
-                for who in paper.active_owners():  # each person's own paper account
-                    with db.as_owner(who):
-                        paper.mark_to_market(db.get_settings(),
-                                             notify=lambda s, k, m: alerts.notify(s, k, m, "caution"))
+            if st["open"] or now >= next_mtm:   # every minute in market hours, hourly otherwise
+                next_mtm = now + 3600
+                _mark_all(st, now)
             _bg["cycles"] += 1
         except Exception as e:  # noqa: BLE001 - the loop must survive any single failure
             _log_err("background", e)
+        try:
+            db.close_if_idle(90)   # let Neon sleep between the (hourly) after-hours jobs
+        except Exception as e:  # noqa: BLE001
+            _log_err("db idle", e)
         time.sleep(60)
 
 
@@ -169,6 +202,7 @@ async def require_login(request, call_next):
         return _private(RedirectResponse("/login", status_code=303))
     db.set_owner(user or "")  # every query in this request works on this person's own data
     if user:
+        _bg["last_user"] = time.time()   # wakes the background jobs (see _background_loop)
         admin.touch(user)  # "last active" for the admin panel (at most every 5 minutes)
     return _private(await call_next(request))
 

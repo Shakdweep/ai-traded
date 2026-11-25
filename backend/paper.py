@@ -191,6 +191,45 @@ def process_queue(settings, notify=None):
                  ("not filled during the next session", o["id"]))
 
 
+# ---- database-free watch while the site sleeps (nobody logged in): an in-memory copy of every
+# open paper position, checked against live prices without touching the database. Only when a
+# stop, target, square-off or queued fill is actually due does the background loop wake it.
+WATCH = {"positions": [], "queued": False, "loaded": False}
+
+
+def snapshot(flat_by_of=None):
+    """Refresh the in-memory copy (call while the database is awake anyway)."""
+    rows = db.q("SELECT owner, symbol, qty, stop, target1, target2, mode, opened_at FROM paper_positions "
+                "WHERE status='open'")
+    for r in rows:
+        r["flat_by"] = (flat_by_of or {}).get(r["owner"]) or db.DEFAULT_SETTINGS.get("intraday_flat_by", "15:15")
+    q = db.q("SELECT COUNT(*) AS n FROM paper_orders WHERE status='queued'", one=True)
+    WATCH.update(positions=rows, queued=bool(q and q["n"]), loaded=True)
+
+
+def due_without_db(price_of=None, now=None):
+    """True if any open paper position would act on the latest price (same rules as
+    mark_to_market), or a queued order can fill. Uses prices only, never the database."""
+    st = cal.market_status(now)
+    if not st["open"]:
+        return False
+    if WATCH["queued"]:
+        return True
+    now = now or cal.now_ist()
+    for p in WATCH["positions"]:
+        if p["mode"] == "intraday" and now.time() >= cal.hhmm(p["flat_by"]) and                 cal.to_ist(p["opened_at"]).date() == now.date():
+            return True
+        try:
+            px = price_of(p["symbol"]) if price_of else                 yahoo.quote_from_chart(yahoo.chart(yahoo.to_yahoo(p["symbol"]), "5d", "5m"))["price"]
+        except Exception:  # noqa: BLE001 - no price, nothing to decide
+            continue
+        if px is None:
+            continue
+        if (p["stop"] and px <= p["stop"]) or (p["target1"] and px >= p["target1"]) or                 (p["target2"] and px >= p["target2"]):
+            return True
+    return False
+
+
 def active_owners():
     """Everyone with an open paper position or a queued paper order (the background job checks each)."""
     rows = db.q("SELECT DISTINCT owner FROM paper_positions WHERE status='open' "
