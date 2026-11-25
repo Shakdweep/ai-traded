@@ -52,7 +52,16 @@ function clearView() {
   state.charts.forEach((c) => { try { c.remove(); } catch { } });
   state.charts = []; state.timers.forEach(clearInterval); state.timers = [];
 }
-function every(ms, fn) { state.timers.push(setInterval(fn, ms)); }
+// Auto-refresh only while someone is actually looking: a hidden tab, or 10 minutes without a
+// click/key/scroll/touch, pauses every timer so the server's database can go to sleep.
+const IDLE_MS = 10 * 60 * 1000;
+let lastInput = Date.now();
+["pointerdown", "keydown", "wheel", "touchstart", "scroll"].forEach((ev) =>
+  window.addEventListener(ev, () => { const was = isIdle(); lastInput = Date.now(); if (was) wake(); }, { passive: true }));
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { lastInput = Date.now(); wake(); } });
+function isIdle() { return document.hidden || Date.now() - lastInput > IDLE_MS; }
+function wake() { refreshHeader(); }
+function every(ms, fn) { state.timers.push(setInterval(() => { if (!isIdle()) fn(); }, ms)); }
 function errorBox(e) { return `<div class="empty">⚠️ ${esc(e.message || e)}</div>`; }
 function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 const disclaimer = `<div class="disclaimer">Analysis and paper trading only. Prices come from Yahoo Finance (unofficial, typically delayed), never labelled live. Ratings are transparent rules applied to that data: they are not predictions and not investment advice. Check anything that matters against your broker before acting.</div>`;
@@ -118,7 +127,7 @@ async function refreshHeader() {
 }
 function clock() { $("#clock").textContent = new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false }) + " IST"; }
 setInterval(clock, 1000); clock();
-setInterval(refreshHeader, 60000);
+setInterval(() => { if (!isIdle()) refreshHeader(); }, 60000);
 
 let searchT;
 $("#search").addEventListener("input", (e) => {
